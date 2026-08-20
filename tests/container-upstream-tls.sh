@@ -56,7 +56,11 @@ cat "$fixture/corporate-root.crt" >> "$fixture/corporate-bundle.crt"
 # time. Generate the intentionally expired leaf with the same cryptography stack
 # shipped in the release image. This is test-only material on an internal
 # network; it never contacts Microsoft or leaves the fixture directory.
-docker run --rm -i --network none --entrypoint python3 -v "$fixture":/data "$image" - <<'PY'
+# Run the fixture generator as the invoking user. Docker otherwise creates the
+# generated private key as root on the host bind mount, making the following
+# permission hardening fail on GitHub's hosted runner.
+docker run --rm -i --network none --user "$(id -u):$(id -g)" --entrypoint python3 \
+  -v "$fixture":/data "$image" - <<'PY'
 import datetime
 from pathlib import Path
 from cryptography import x509

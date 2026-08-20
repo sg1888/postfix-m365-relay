@@ -130,6 +130,20 @@ docker compose up -d
 docker compose logs -f postfix-m365-relay
 ```
 
+> [!IMPORTANT]
+> **Pick the right image for your CPU.** The default image needs a modern CPU
+> baseline (x86-64-v3 / AVX2). Many machines — especially **virtual machines**
+> (the default QEMU/KVM CPU hides host features) and budget CPUs (Celeron/Atom/
+> N-series, NAS boxes) — don't have it, and will crash at startup with
+> `CPU does not support x86-64-v3`. If that happens, use the broader **v2** image:
+> ```bash
+> echo 'MAIL_IMAGE=docker.io/sg1888/postfix-m365-relay:latest-x86-64-v2' > .env
+> docker compose up -d
+> ```
+> Check with `grep -o -m1 avx2 /proc/cpuinfo` (empty output → use the v2 image).
+> Copy [`.env.example`](.env.example) to get started, and see
+> [Base image & CPU compatibility](docs/BASE-IMAGE.md) for the full explanation.
+
 A minimal `compose.yaml` looks like this:
 
 ```yaml

@@ -10,7 +10,18 @@ state=postfix-m365-relay-alert-trigger-state
 spool=postfix-m365-relay-alert-trigger-spool
 fixture=$PWD/tests/.tmp-alert-trigger
 cleanup() { docker rm -f "$relay" "$webhook" >/dev/null 2>&1 || true; docker network rm "$network" >/dev/null 2>&1 || true; docker volume rm "$state" "$spool" >/dev/null 2>&1 || true; rm -rf "$fixture"; }
-trap cleanup EXIT
+report_failure() {
+  rc=$?
+  if (( rc != 0 )); then
+    echo "automatic alert trigger matrix failed; webhook capture:" >&2
+    [[ -f $fixture/webhooks.jsonl ]] && tail -n 20 "$fixture/webhooks.jsonl" >&2 || true
+    echo "automatic alert trigger matrix relay log:" >&2
+    docker logs "$relay" >&2 2>&1 || true
+  fi
+  cleanup
+  exit "$rc"
+}
+trap report_failure EXIT
 cleanup
 install -d -m 0700 "$fixture"
 expiry=$(( $(date +%s) + 3600 ))
@@ -34,7 +45,11 @@ docker exec "$relay" bash -c 'exec 3<>/dev/tcp/127.0.0.1/2525' >/dev/null 2>&1
 
 verify() { docker exec "$relay" env "$@" /usr/local/libexec/mail-relay/verify-relay.sh >/dev/null 2>&1 || true; }
 event_seen() { EVENT=$1 STATUS=$2 FILE=$fixture/webhooks.jsonl python3 -c 'import json,os; assert any((d.get("event"),d.get("status"))==(os.environ["EVENT"],os.environ["STATUS"]) for d in map(json.loads,open(os.environ["FILE"])))'; }
-wait_event() { for _ in {1..20}; do event_seen "$1" "$2" && return; sleep 1; done; return 1; }
+wait_event() {
+  for _ in {1..20}; do event_seen "$1" "$2" && return; sleep 1; done
+  echo "timed out waiting for event=$1 status=$2" >&2
+  return 1
+}
 event_lines() { grep -c '"event": "'$1'"' "$fixture/webhooks.jsonl" || true; }
 
 # Token, OAuth certificate, CA age, queue, SASL, inbound TLS, push monitor,

@@ -175,8 +175,16 @@ cp -a /usr/share/postfix-defaults/. /etc/postfix/
 # `secure` back to encryption without identity. The extra file is public trust
 # material, never a private CA key, and is copied into tmpfs so the immutable
 # package bundle remains untouched.
-system_ca=/etc/pki/tls/certs/ca-bundle.crt
-[[ -s $system_ca ]] || fail "system CA bundle is absent: $system_ca"
+# The system trust bundle lives at different paths per distro family: RHEL/
+# AlmaLinux use /etc/pki, Debian/Ubuntu use /etc/ssl. Check the EL path first so
+# the AlmaLinux image is unaffected.
+if [[ -s /etc/pki/tls/certs/ca-bundle.crt ]]; then
+  system_ca=/etc/pki/tls/certs/ca-bundle.crt
+elif [[ -s /etc/ssl/certs/ca-certificates.crt ]]; then
+  system_ca=/etc/ssl/certs/ca-certificates.crt
+else
+  fail 'system CA bundle is absent (looked in /etc/pki/tls/certs and /etc/ssl/certs)'
+fi
 if [[ -n ${MAIL_UPSTREAM_CA_EXTRA_FILE:-} ]]; then
   extra_ca=$MAIL_UPSTREAM_CA_EXTRA_FILE
   [[ -f $extra_ca && -r $extra_ca ]] || fail 'MAIL_UPSTREAM_CA_EXTRA_FILE must be a readable certificate file'
@@ -198,7 +206,13 @@ if not blocks:
 now = datetime.datetime.now(datetime.timezone.utc)
 for block in blocks:
     certificate = x509.load_pem_x509_certificate(block)
-    if not certificate.not_valid_before_utc <= now <= certificate.not_valid_after_utc:
+    try:
+        not_before = certificate.not_valid_before_utc
+        not_after = certificate.not_valid_after_utc
+    except AttributeError:  # cryptography < 42 (e.g. Ubuntu 24.04 ships 41.x)
+        not_before = certificate.not_valid_before.replace(tzinfo=datetime.timezone.utc)
+        not_after = certificate.not_valid_after.replace(tzinfo=datetime.timezone.utc)
+    if not not_before <= now <= not_after:
         raise ValueError("certificate is outside its validity interval")
 PY
   combined_ca=$RUN_DIR/upstream-ca-bundle.pem

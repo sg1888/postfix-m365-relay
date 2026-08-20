@@ -65,6 +65,15 @@ assert_postconf() {
   }
 }
 
+# The system trust bundle lives at a distro-specific path (RHEL/AlmaLinux use
+# /etc/pki, Debian/Ubuntu use /etc/ssl). Detect it from the running image the
+# same way the entrypoint does so the CAfile assertion is not tied to one distro.
+system_ca_path() {
+  docker exec "$container" sh -c '
+    if [ -s /etc/pki/tls/certs/ca-bundle.crt ]; then echo /etc/pki/tls/certs/ca-bundle.crt;
+    elif [ -s /etc/ssl/certs/ca-certificates.crt ]; then echo /etc/ssl/certs/ca-certificates.crt; fi'
+}
+
 start_mode() {
   current_mode=$1
   docker rm -f "$container" >/dev/null 2>&1 || true
@@ -88,7 +97,7 @@ assert_postconf smtpd_relay_restrictions 'permit_mynetworks, reject'
 assert_postconf maximal_queue_lifetime 12h
 assert_postconf bounce_queue_lifetime 12h
 assert_postconf smtp_tls_security_level secure
-assert_postconf smtp_tls_CAfile /etc/pki/tls/certs/ca-bundle.crt
+assert_postconf smtp_tls_CAfile "$(system_ca_path)"
 [[ $(docker exec "$container" date +%Z) != UTC ]]
 echo 'ok secure upstream TLS, 12-hour queue defaults, and validated TZ are effective'
 

@@ -93,10 +93,22 @@ else
 fi
 
 # A running image is immutable: its public root store does not receive distro
-# updates in place. This age check is intentionally based on RPM install time,
+# updates in place. This age check is intentionally based on package install time,
 # not individual root expiry dates; trust stores also remove distrusted roots
 # and add new intermediates, neither of which an expiry-only scan can detect.
-ca_install_epoch=$(rpm -q --qf '%{INSTALLTIME}' ca-certificates 2>/dev/null || true)
+if command -v rpm >/dev/null 2>&1; then
+  ca_install_epoch=$(rpm -q --qf '%{INSTALLTIME}' ca-certificates 2>/dev/null || true)
+elif command -v dpkg-query >/dev/null 2>&1; then
+  # Debian/Ubuntu carry no package install-time field. Approximate the trust
+  # store's vintage with the mtime of the package changelog, which dpkg preserves
+  # from the .deb (the package build date, not our install moment) and which
+  # advances whenever ca-certificates is updated — matching the intent of
+  # flagging a stale bundle rather than a freshly rebuilt image.
+  ca_doc=$(ls -t /usr/share/doc/ca-certificates/changelog*.gz 2>/dev/null | head -n1)
+  ca_install_epoch=$(stat -c %Y "$ca_doc" 2>/dev/null || true)
+else
+  ca_install_epoch=
+fi
 ca_max_age_days=${MAIL_CA_BUNDLE_MAX_AGE_DAYS:-90}
 if [[ $ca_install_epoch =~ ^[0-9]+$ && $ca_max_age_days =~ ^[0-9]+$ ]]; then
   ca_age_days=$(( ($(date +%s) - ca_install_epoch) / 86400 ))

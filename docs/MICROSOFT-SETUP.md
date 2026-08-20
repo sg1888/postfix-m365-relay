@@ -137,9 +137,13 @@ full two hours before treating SMTP success or failure as evidence.
 ## 5. Upload only the public certificate
 
 Start the container with its state volume. On first boot it generates an
-RSA-4096 key and prints the public certificate and SHA-1 thumbprint. Upload the
-public PEM under **App registrations → Certificates & secrets → Certificates**.
-Never upload, email, or copy the private key from the volume.
+RSA-4096 key and writes the public certificate to
+`./mail-relay/microsoft365-app-public-cert.pem` (SHA-1 thumbprint alongside in
+`microsoft365-app-cert-thumbprint.txt`). Upload that public PEM under
+**App registrations → Certificates & secrets → Certificates**. Never upload,
+email, or copy the private key from the volume. Once Microsoft accepts the
+certificate the relay removes the export automatically and rotates the
+certificate itself thereafter — this is the only manual certificate step.
 
 The container retries token minting. After propagation completes, it submits
 without a mailbox password.

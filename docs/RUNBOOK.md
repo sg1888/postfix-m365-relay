@@ -36,9 +36,11 @@ docker exec postfix-m365-relay postconf -n
 2. Confirm `config/mail-relay.conf` is generated as `0600`, no SMTP listener is
    open, and logs name missing required fields.
 3. Edit the host file. Container proceeds on its own.
-4. Observe RSA-4096 generation; copy only the public PEM.
+4. Observe RSA-4096 generation; the public half is exported to
+   `./mail-relay/microsoft365-app-public-cert.pem`.
 5. Confirm the private key is `0600` in `/var/lib/mail-relay/secrets`.
-6. Upload the public certificate to the test app registration.
+6. Upload `./mail-relay/microsoft365-app-public-cert.pem` to the test app
+   registration; the export is removed automatically once Microsoft accepts it.
 7. Do not restart merely to get a token; the five-minute loop retries.
 8. After propagation, observe successful mint and queue drain.
 9. Send two messages through different `MAIL_SENDER_*` values to one recipient

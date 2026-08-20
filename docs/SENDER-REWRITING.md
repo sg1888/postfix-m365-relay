@@ -19,8 +19,12 @@ MAIL FROM:<diun@relay.example.com>       -> MAIL FROM:<relay@example.com>
 From: "DIUN" <diun@relay.example.com>   -> From: "Diun [Server A]" <relay@example.com>
 ```
 
-Unknown envelope senders are rejected before rewriting. The catch-all canonical
-map is not an open “accept anything” rule, whatever it looks like.
+With `MAIL_SENDER_ALLOWLIST=on`, unknown envelope senders are rejected before
+rewriting; the catch-all canonical map is not an open “accept anything” rule,
+whatever it looks like. With the default `MAIL_SENDER_ALLOWLIST=off`, the relay
+instead accepts any envelope sender from an already-authorized client and lets
+the catch-all collapse it to the mailbox — who may connect is still gated by
+`MAIL_INBOUND_AUTH`/`MAIL_TRUSTED_NETWORKS`, so this is not an open relay.
 
 ## How this relates to Postfix `canonical_maps`
 
@@ -38,7 +42,8 @@ both senders and recipients in envelopes and headers alike. This relay must
 never touch a recipient without warning, so it only enables the sender-specific
 variant. The work splits instead:
 
-- `smtpd_sender_restrictions` admits only configured envelope senders;
+- `smtpd_sender_restrictions` admits only configured envelope senders when
+  `MAIL_SENDER_ALLOWLIST=on` (the default `off` admits any authorized client);
 - `sender_canonical_maps` rewrites only the accepted envelope sender; and
 - `smtp_header_checks` separately rewrites the visible `From:` address and
   display name, including correct quoting of special characters.

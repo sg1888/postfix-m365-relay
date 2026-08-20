@@ -18,7 +18,7 @@ Everything here is optional unless you expose the relay publicly.
 | `MAIL_RELAY_TENANT` | yes | Entra tenant ID |
 | `MAIL_RELAY_CLIENT_ID` | yes | app registration client ID |
 | `MAIL_SEND_MAILBOX` | yes | dedicated shared mailbox used only for relay submission (recommended); licensed user mailbox supported |
-| `MAIL_SENDER_<KEY>` | one or more | address an application may use at `MAIL FROM` |
+| `MAIL_SENDER_<KEY>` | no | address an application may use at `MAIL FROM`; optional — with none set, all senders collapse to `MAIL_SEND_MAILBOX` |
 | `MAIL_SENDER_NAME_<KEY>` | no | forced display name for that sender |
 | `MAIL_ADMIN_EMAIL` | recommended | alert, verification, and rotation-proof recipient |
 
@@ -41,6 +41,7 @@ doesn't touch it.
 | `MAIL_RELAY_MAX_SIZE` | `3m` | accepted message size (`k`, `m`, or bytes) |
 | `MAIL_RELAY_RATE_LIMIT` | `200` | connections per ten minutes per client |
 | `MAIL_SENDER_NAME_FALLBACK` | `the relay` | name for a bare From address |
+| `MAIL_SENDER_ALLOWLIST` | `off` | `off`: accept any envelope sender from an authorized client and collapse it. `on`: reject any From not equal to `MAIL_SEND_MAILBOX` or a configured `MAIL_SENDER_*` |
 | `TZ` | container `/etc/localtime` | IANA timezone used by Postfix and local-time tools |
 
 Container engines don't inherit your server's timezone. Set `TZ=America/New_York`
@@ -54,12 +55,18 @@ incident timelines line up across hosts.
 
 ```env
 MAIL_SENDER_MODE=collapse
+# Named senders are optional. Define one only to pin a display name:
 MAIL_SENDER_BACKUP=backup@relay.example.local
 MAIL_SENDER_NAME_BACKUP=Backups
 ```
 
-Only configured `MAIL_SENDER_*` addresses may submit; both envelope and header
-become `MAIL_SEND_MAILBOX`, display names preserved or forced. Safe and boring—high praise.
+Both envelope and header become `MAIL_SEND_MAILBOX`; display names are preserved
+(the app's own, or `MAIL_SENDER_NAME_FALLBACK` for a bare address) or forced by a
+matching `MAIL_SENDER_NAME_<KEY>`. By default (`MAIL_SENDER_ALLOWLIST=off`) any
+envelope sender from an already-authorized client is accepted and collapsed — no
+per-application registration needed. Set `MAIL_SENDER_ALLOWLIST=on` to restrict
+submission to `MAIL_SEND_MAILBOX` and configured `MAIL_SENDER_*` addresses. Safe
+and boring—high praise.
 
 ### Passthrough
 

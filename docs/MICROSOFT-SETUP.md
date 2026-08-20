@@ -1,16 +1,14 @@
 # Microsoft 365 setup: shared mailbox with scoped App RBAC
 
-The recommended identity is a **dedicated, unlicensed shared mailbox**. Do not
-use it for ordinary correspondence, support traffic, user sign-in, or message
-storage. Its purpose is only to provide the Microsoft 365 outbox used by this
-relay. Keeping it empty and purpose-specific reduces both the value of the
-mailbox and the effect of a configuration mistake.
+Use a **dedicated, unlicensed shared mailbox**—nothing else. Not correspondence,
+support traffic, sign-in, or storage. One job: M365 outbox for this relay. An
+empty, single-purpose mailbox is worthless to an attacker and forgiving when
+you misconfigure it.
 
-This project uses Microsoft's claims-less Exchange **RBAC for Applications**
-path. The app registration has no API permissions. Exchange grants only
-`Application SMTP.SendAsApp`, restricted to mailboxes in one dedicated group.
-Microsoft describes the role as permitting SMTP client submission; it does not
-grant mail read, mail write, calendar, contacts, or general Graph access:
+This uses Microsoft's claims-less Exchange **RBAC for Applications**. The app
+registration has zero API permissions. Exchange grants one thing: `Application
+SMTP.SendAsApp`, scoped to mailboxes in one dedicated group. That's it—no mail
+read, write, calendar, contacts, or Graph access.
 
 - [Configure SMTP onboarding to App RBAC](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/smtp-app-rbac-onboarding)
 - [RBAC for Applications in Exchange Online](https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac)
@@ -27,26 +25,25 @@ grant mail read, mail write, calendar, contacts, or general Graph access:
 | Sign in interactively as the shared mailbox | no |
 | Authenticate with a reusable mailbox password | no |
 
-This is deliberately narrower than the older Entra-permission plus
-`FullAccess` approach. Do **not** add the Office 365 Exchange Online application
-permission named `SMTP.SendAsApp`; Microsoft warns that the claim causes an
-unnecessary mailbox-permission check in the App RBAC flow. Do not grant
-`FullAccess`, `SendAs`, Graph `Mail.Send`, or either Graph mail-reading role.
-App RBAC and Entra permissions are additive, so an extra grant expands access
-rather than replacing this scope.
+This is deliberately narrower than the old Entra-permission plus `FullAccess`.
+Do **not** add the Office 365 Exchange Online application permission named
+`SMTP.SendAsApp`—Microsoft warns it triggers an unnecessary mailbox-permission
+check in the App RBAC flow. Never grant `FullAccess`, `SendAs`, Graph
+`Mail.Send`, or Graph mail-reading roles. App RBAC and Entra permissions stack,
+so an extra grant widens access instead of replacing this scope.
 
-The certificate is still a powerful sending credential. Protect the state
-volume, restrict the management scope, and test both an allowed and a denied
-mailbox. “Cannot read mail” does not mean “harmless if stolen”: an attacker with
-the private key could submit mail as an in-scope mailbox until the credential is
-removed.
+None of that makes the certificate harmless. It is a powerful sending
+credential. Protect the state volume, keep the management scope tight, and test
+both an allowed and a denied mailbox. "Cannot read mail" is not "safe if
+stolen": anyone holding the private key can submit mail as an in-scope mailbox
+until you kill the credential.
 
 ## 1. Create the dedicated shared mailbox
 
 In the Microsoft 365 admin center, create a shared mailbox such as
 `relay@example.com`. Then:
 
-1. Use it only for this relay. Do not publish it as a contact address or use its
+1. Reserve it for this relay. Do not publish it as a contact address or use its
    inbox for business messages.
 2. Block sign-in for the account that anchors the shared mailbox. App-only OAuth
    does not use interactive sign-in.
@@ -55,18 +52,16 @@ In the Microsoft 365 admin center, create a shared mailbox such as
 4. Leave the shared mailbox unlicensed when it stays within Microsoft's
    unlicensed limits.
 
-Microsoft permits a shared mailbox to store up to 50 GB without its own license.
-A license is required for more than 50 GB and for certain archive, hold, and
-advanced compliance features. The tenant itself must have a subscription that
-includes Exchange Online. Review the current limits before relying on the
-unlicensed status:
+A shared mailbox holds up to 50 GB unlicensed. Beyond that, archive, hold, and
+advanced compliance features require a license. The tenant needs Exchange Online
+regardless. Check limits before relying on unlicensed status:
 
 - [About shared mailboxes](https://learn.microsoft.com/en-us/microsoft-365/admin/email/about-shared-mailboxes?view=o365-worldwide)
 - [Exchange Online limits](https://learn.microsoft.com/en-us/office365/servicedescriptions/exchange-online-service-description/exchange-online-limits)
 - [Create a shared mailbox](https://learn.microsoft.com/en-us/microsoft-365/admin/email/create-a-shared-mailbox?view=o365-worldwide)
 
-Because this mailbox is outbound-only, monitor its size and avoid retaining
-copies indefinitely. Reaching the storage limit can prevent new sends.
+This mailbox is outbound-only, so watch its size and don't hoard copies. Hit the
+storage limit and new sends stop.
 
 ## 2. Create the app registration—with no API permissions
 
@@ -82,19 +77,17 @@ In Microsoft Entra admin center:
    `SMTP.SendAsApp`, `Mail.Send`, `Mail.Read`, and `Mail.ReadWrite` permissions
    if this is a new relay-only app that inherited an earlier experiment.
 
-Do not assign a user to the enterprise application. Client-credentials OAuth
-uses the certificate, not an interactive user session.
+Don't assign a user. Client-credentials OAuth uses the certificate, not a session.
 
 ## 3. Create the mailbox-scope group
 
-Create one dedicated Exchange distribution group or mail-enabled security group,
-for example `postfix-m365-relay-mailboxes@example.com`. Add the relay shared
-mailbox as a **direct** member. Do not add broad groups, ordinary users, or all
-mailboxes.
+Create one dedicated Exchange distribution group or mail-enabled security group
+like `postfix-m365-relay-mailboxes@example.com`. Add the relay shared mailbox as
+a **direct** member only—no broad groups, users, or all mailboxes.
 
-You provide the group's identity or email address to the setup script. You do
-not provide its distinguished name. The script retrieves Exchange's real
-`DistinguishedName` and uses Microsoft's documented `MemberOfGroup` filter:
+You provide the group's identity or email to the script, not its distinguished
+name. The script retrieves Exchange's actual `DistinguishedName` and uses
+Microsoft's documented `MemberOfGroup` filter:
 
 ```powershell
 $group = Get-DistributionGroup -Identity 'postfix-m365-relay-mailboxes@example.com'
@@ -131,7 +124,7 @@ Review the output, then omit `-WhatIfOnly`. The script:
 7. runs `Test-ServicePrincipalAuthorization` against the mailbox;
 8. reports legacy or additive grants for manual review without deleting them.
 
-These are the Microsoft references used to implement and audit those commands:
+Microsoft references for these commands:
 
 - [`New-ServicePrincipal` and App RBAC configuration](https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac)
 - [SMTP-specific `Application SMTP.SendAsApp` onboarding](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/smtp-app-rbac-onboarding)
@@ -144,13 +137,12 @@ full two hours before treating SMTP success or failure as evidence.
 ## 5. Upload only the public certificate
 
 Start the container with its state volume. On first boot it generates an
-RSA-4096 client key and prints the public certificate and SHA-1 thumbprint.
-Upload the public PEM under **App registrations → Certificates & secrets →
-Certificates**. Never upload, email, or copy the private key from the state
-volume.
+RSA-4096 key and prints the public certificate and SHA-1 thumbprint. Upload the
+public PEM under **App registrations → Certificates & secrets → Certificates**.
+Never upload, email, or copy the private key from the volume.
 
-The container retries token minting. After certificate and Exchange propagation
-complete, it begins submitting without a mailbox password.
+The container retries token minting. After propagation completes, it submits
+without a mailbox password.
 
 ## 6. Prove the scope and display names
 
@@ -166,16 +158,16 @@ Use test recipients and unique Message-IDs:
 4. Keep the shared mailbox as the configured baseline only after both positive
    and negative checks pass.
 
-This project observed an unlicensed shared mailbox submit successfully through
-claims-less `Application SMTP.SendAsApp`; bracketed and parenthesized display
-names were preserved exactly at the recipient. That observation applies to the
-tested App RBAC design—not to older `FullAccess` or Entra-permission workflows.
+This design confirmed: unlicensed shared mailbox, claims-less `Application
+SMTP.SendAsApp`, bracketed and parenthesized display names preserved exactly at
+recipient. This applies to App RBAC—not older `FullAccess` or Entra-permission
+flows.
 
 ## Adding or removing an authorized mailbox
 
-The same service principal and app registration may cover another mailbox by
-adding it to the existing dedicated scope group. A separate group and scope are
-not required unless the mailbox needs a different authorization boundary.
+Add another mailbox to the same service principal by adding it to the scope
+group. A separate group and scope are only needed if the mailbox needs a
+different boundary.
 
 After changing membership, wait two hours, then run:
 
@@ -186,6 +178,5 @@ Test-ServicePrincipalAuthorization `
   Format-Table RoleName,AllowedResourceScope,InScope
 ```
 
-Removing a mailbox from the group revokes the scoped grant after propagation.
-Always perform a negative SMTP AUTH test after the waiting period; do not infer
-revocation solely from the group-management command succeeding.
+Removing a mailbox revokes the scoped grant after propagation. Always test AUTH
+rejection after the waiting period—don't infer revocation from the command alone.

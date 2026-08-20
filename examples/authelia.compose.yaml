@@ -1,7 +1,7 @@
-# Merge these blocks into an existing Authelia stack. This example intentionally
-# preserves Authelia's TLS-required notifier default because reset/verification
-# messages are security-sensitive. The relay certificate must name
-# smtp.example.com and chain to a root Authelia trusts.
+# Merge these blocks into your existing Authelia stack. This example keeps
+# Authelia's TLS-required notifier default—reset/verification messages need it.
+# The relay certificate must name smtp.example.com and chain to a root Authelia
+# trusts.
 services:
   postfix-m365-relay:
     environment:
@@ -16,8 +16,8 @@ services:
         aliases: [postfix-m365-relay]
 
   authelia:
-    # Keep the image, configuration, secrets, storage, and existing networks
-    # from your normal Authelia deployment; these are the mail-specific fields.
+    # Keep image, config, secrets, storage, and networks from your production
+    # Authelia setup; these are just the mail-specific additions.
     image: docker.io/authelia/authelia:latest
     environment:
       AUTHELIA_NOTIFIER_SMTP_ADDRESS: submission://postfix-m365-relay:2525

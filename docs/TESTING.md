@@ -1,17 +1,12 @@
 # Release and live-install qualification
 
-This is the release gate. Use a dedicated test mailbox, dedicated Entra app
-registration, isolated relay instance, test recipients, and disposable device
-credentials. Never point these drills at a production relay or mailbox.
+This is the release gate. Everything runs on a dedicated test mailbox, Entra app registration, isolated relay, test recipients, and disposable device credentials. Don't point these at production.
 
-After **any Exchange permission or organization-setting change, wait two full
-hours before interpreting a send result**. A probe during that window is
-informational only. Record only behavior you personally observed; config output,
-an exit code, and local SMTP acceptance are not proof of Microsoft delivery.
+After **any Exchange permission or organization-setting change, wait two full hours before interpreting a send result**. A probe before then is informational only. Record what you observed yourself; config output, exit codes, and SMTP acceptance prove nothing about Microsoft delivery.
 
 ## Evidence record
 
-Create one row per test. Preserve secrets nowhere in the record.
+One row per test. No secrets in the record, ever.
 
 | Field | Record |
 |---|---|
@@ -41,20 +36,11 @@ Run every suite against the candidate image:
 ./tests/run-offline.sh postfix-m365-relay:test
 ```
 
-The runner prints and stops at each named suite, so a failure remains directly
-traceable. CI keeps the same suites as separate named steps for reviewability.
+The runner stops at each named suite; failure pinpoints the problem. CI runs them as separate named steps for visibility.
 
-These cover invalid configuration, malformed secrets, sender-name escaping,
-collapse/passthrough maps, all five inbound policies, trusted and untrusted
-source networks, correct and wrong passwords, authorized and unauthorized
-senders, TLS-before-AUTH, credential revocation, certificate separation and
-import, supervisor behavior, a wedged healthcheck, read-only operation, and a
-deferred message retaining the same queue ID across forced replacement before
-draining through the recovered isolated upstream. The inbound fullchain test
-uses a root, intermediate, and leaf to prove Postfix serves the intermediate,
-validates the hostname, and loads an atomically replaced key/fullchain pair.
+These cover invalid configuration, malformed secrets, sender-name escaping, collapse/passthrough maps, all five inbound policies, trusted/untrusted networks, right/wrong passwords, authorized/unauthorized senders, TLS-before-AUTH, credential revocation, certificate handling, supervisor behavior, wedged healthcheck, read-only operation, and deferred messages surviving queue ID replacement through recovery. The inbound fullchain test verifies Postfix serves the intermediate, validates hostname, and loads atomically replaced key/fullchain pairs.
 
-Also AST-parse both PowerShell files on a workstation with PowerShell:
+Then AST-parse both PowerShell files on a workstation that has PowerShell:
 
 ```powershell
 $errors = $null
@@ -66,20 +52,19 @@ $errors
 $errors
 ```
 
-An empty error list is the expected result for each file.
+Empty errors = pass for each file.
 
 ## Phase 2: isolated first boot
 
 1. Start the candidate with an empty `/config` bind and empty state volume.
 2. Confirm it creates `mail-relay.conf` as `0600`, prints setup instructions,
-   does not open SMTP, and automatically proceeds after the required fake test
-   identifiers and sender are saved.
+   doesn't open SMTP, and auto-proceeds after required test identifiers and sender are saved.
 3. Watch generation of the RSA-4096 OAuth certificate and public PEM output.
 4. Confirm the private key is `0600`, Postfix stays up, the token loop retries,
    and a locally accepted test message remains deferred without a token.
-5. Confirm no host port is published in the default posture.
-6. Run the bad-data cases below against disposable instances. Each must exit
-   nonzero with the expected diagnostic, before accepting mail.
+5. Confirm no host port is published by default.
+6. Run the bad-data cases below on disposable instances. Each must exit
+   nonzero with the expected diagnostic before accepting mail.
 
 | ID | Bad input | Required result |
 |---|---|---|
@@ -100,8 +85,8 @@ An empty error list is the expected result for each file.
 
 ## Phase 3: test Entra and Exchange setup
 
-This phase changes external state and requires explicit approval immediately
-before execution.
+This phase changes external state, so get explicit approval immediately before
+you run it.
 
 1. Create or identify a dedicated test shared mailbox and test app. Keep API
    permissions empty; use scoped Exchange `Application SMTP.SendAsApp`.
@@ -110,16 +95,13 @@ before execution.
 4. Upload only the public certificate printed by first boot.
 5. Record the final permission-change time and wait two hours.
 6. Without restarting the container, watch the token loop mint a token and the
-   previously deferred queue drain.
+   deferred queue drain.
 
-Do not enable alias sending yet. Collapse mode is qualified first.
+Leave alias sending off for now. Collapse mode gets qualified first.
 
 ## Phase 4: live collapse-mode delivery and rejection
 
-Use `scripts/qualify-relay.py`; device passwords, when needed, come from a
-protected file and never from argv. Every accepted run prints a unique
-Message-ID. Map it to a Postfix queue ID, require `status=sent`, and then confirm
-the exact message in the test recipient mailbox.
+Use `scripts/qualify-relay.py`; device passwords come from a protected file, never argv. Every accepted run prints a unique Message-ID. Map it to a Postfix queue ID, require `status=sent`, then verify the exact message landed in the test recipient mailbox.
 
 ```bash
 ./scripts/qualify-relay.py \
@@ -143,9 +125,7 @@ Run this matrix:
 
 ## Phase 5: live inbound policy truth tables
 
-First run the isolated two-network automation. Then repeat the selected published
-posture using two real test clients: one address inside the allowlist and one
-outside it. Bind the host port to one explicit test-LAN interface only.
+Run isolated two-network automation first. Then repeat the selected published posture with two real test clients: one address inside the allowlist, one outside. Bind the host port to a single explicit test-LAN interface, nowhere else.
 
 | Policy | Trusted, no auth | Untrusted, valid auth | Trusted, valid auth | Neither |
 |---|---:|---:|---:|---:|
@@ -156,7 +136,7 @@ outside it. Bind the host port to one explicit test-LAN interface only.
 
 For every auth-enabled row also prove:
 
-- pre-STARTTLS EHLO contains no AUTH and early AUTH is rejected;
+- pre-STARTTLS EHLO contains no AUTH; early AUTH rejected;
 - post-STARTTLS EHLO offers exactly PLAIN and LOGIN;
 - wrong password returns 535;
 - unauthorized sender still fails after valid authentication;
@@ -164,23 +144,11 @@ For every auth-enabled row also prove:
 - removing one credential and restarting revokes it while another still works;
 - no password appears in inspect output, logs, state, or process arguments.
 
-For BYO inbound TLS, record the served fingerprint, replace the mounted pair,
-restart, and observe the new fingerprint. A mismatched replacement must prevent
-boot rather than serve an unintended certificate.
+For BYO inbound TLS, record the served fingerprint, swap the mounted pair, restart, confirm the new fingerprint. Mismatched replacement must prevent boot, not serve the wrong cert.
 
-For generated inbound TLS, force a safe artificial renewal window. Confirm the
-leaf fingerprint changes, the public-key digest does not, `cert.pem.previous`
-exists, the replacement extends beyond the threshold, and Postfix still answers
-after its reload. Also inspect `maximal_queue_lifetime` and
-`bounce_queue_lifetime`: both must be `12h` by default and both must follow an
-explicit override.
+For generated inbound TLS, force a safe artificial renewal window. Confirm the leaf fingerprint changes, the public-key digest stays constant, `cert.pem.previous` exists, replacement extends beyond the threshold, and Postfix still answers after reload. Also inspect `maximal_queue_lifetime` and `bounce_queue_lifetime`: both default to `12h` and must follow explicit override.
 
-For outbound TLS, the real Postfix client must pass all five rows: publicly or
-explicitly trusted matching certificate sends; untrusted CA defers; trusted CA
-with the wrong hostname defers; expired leaf defers; and an explicitly trusted
-corporate inspection root with a matching replacement leaf sends. Also prove
-that compatibility mode `encrypt` accepts the otherwise-untrusted endpoint, so
-the documented security difference is observable rather than assumed.
+For outbound TLS, the real Postfix client must pass all five rows: publicly or explicitly trusted matching cert sends; untrusted CA defers; trusted CA with wrong hostname defers; expired leaf defers; explicitly trusted corporate inspection root with matching replacement leaf sends. Prove also that compatibility mode `encrypt` accepts the otherwise-untrusted endpoint—the documented security difference should be observable, not theoretical.
 
 ## Phase 6: verification and notifications
 
@@ -190,27 +158,20 @@ On the healthy test instance:
    email arrives.
 2. Point the optional webhook at a controlled test receiver; verify valid JSON,
    special-character escaping, success status, and receiver-unreachable handling.
-3. Use a disposable instance with an intentionally wrong test tenant/client ID,
-   set the failure threshold to one, and observe the token-failure webhook.
+3. Use a disposable instance with intentionally wrong test tenant/client ID,
+   set failure threshold to one, observe the token-failure webhook.
 4. Restore valid test inputs and observe automatic token and queue recovery.
 5. Force a verification run and correlate its Message-ID to `status=sent` and
    recipient receipt.
 6. Suspend smtpd and observe the Compose healthcheck fail; resume it and observe
    recovery.
-7. Create queue depth and SASL-failure warning conditions and confirm they are
-   reported without exposing credentials.
+7. Create queue depth and SASL-failure conditions; confirm they're reported
+   without exposing credentials.
 
-For every automatic trigger, require all of the following rather than merely a
-zero exit code: exact email body, exact webhook JSON, one stable reference,
-duplicate suppression on a second failed observation, recovery with that same
-reference and elapsed duration, persistence across container replacement,
-configured-local plus UTC timestamps, and no token/assertion/password/key data.
-Break the email listener while the webhook is healthy, then reverse the failure;
-each channel must be attempted independently and only its own failed delivery
-may remain queued for bounded retry.
+For every automatic trigger, require all of these—not just a zero exit code: exact email body, exact webhook JSON, one stable reference, duplicate suppression on second failure, recovery with same reference and elapsed duration, persistence across container replacement, configured-local and UTC timestamps, and zero token/assertion/password/key exposure.
+Break the email listener while webhook is healthy, reverse it; each channel must be attempted independently and only its own failed delivery may remain queued for bounded retry.
 
-Email alerts cannot leave through a deliberately broken OAuth path; the webhook
-is the independent channel for that failure. Test both channels separately.
+Test both channels separately—email alerts can't escape through a broken OAuth path; webhook is the independent channel.
 
 ## Phase 7: live certificate rotation
 
@@ -218,24 +179,22 @@ This mutates only the dedicated test app and requires approval immediately
 before execution.
 
 1. Record OAuth and inbound TLS certificate hashes and run `--list-keys`.
-2. Induce a proof-send failure on `--force` using a disposable bad upstream
+2. Induce proof-send failure on `--force` with a disposable bad upstream
    endpoint. Watch `addKey`, replication, token proof, failure, abandon cleanup,
-   old-cert continuity, and failure notification. Confirm no orphan remains.
-3. Run a successful `--force`. Watch add, both replication waits, token mint,
-   real proof delivery, atomic swap, immediate re-mint, and success alert.
+   old-cert continuity, failure notification. Confirm no orphan remains.
+3. Run successful `--force`. Watch add, both replication waits, token mint,
+   proof delivery, atomic swap, immediate re-mint, success alert.
 4. Assert the inbound TLS certificate is byte-identical before and after both
    attempts.
 5. Re-run `--list-keys`; identify live and retiring credentials correctly.
-6. In a later invocation, use a test-only zero-day grace to exercise confirmed
-   removal. Prove the live certificate still sends afterward.
+6. In a later invocation, use test-only zero-day grace to exercise confirmed
+   removal. Prove the live certificate sends afterward.
 7. Exercise expired-certificate refusal offline; do not intentionally expire the
    only live test-app credential.
 
 ## Phase 8: passthrough/alias gate
 
-`SendFromAliasEnabled` is organization-wide. Obtain explicit approval, enable it
-only through the guarded PowerShell switch, record the change time, then wait two
-hours before judging a result.
+`SendFromAliasEnabled` is organization-wide. Get explicit approval, enable only through the guarded PowerShell switch, record the change time, wait two hours before judging results.
 
 | ID | Case | Required result |
 |---|---|---|
@@ -244,18 +203,17 @@ hours before judging a result.
 | P03 | allowlisted address that is not a real alias | verifier reports failure and alert fires |
 | P04 | foreign-mailbox address | rejected/out of scope; never represented as supported |
 
-P01 is the feature gate. Passthrough remains unverified until it is watched.
+P01 gates the feature. Passthrough stays unverified until observed.
 
 ## Phase 9: platform and registry release
 
 1. Build and smoke-run arm64, amd64-v3, and the dedicated amd64-v2 image.
-2. On every image assert `sasl-xoauth2` 0.27, cryptography import, `saslpasswd2`,
-   and the expected package architecture.
+2. On every image verify `sasl-xoauth2` 0.27, cryptography import, `saslpasswd2`,
+   and package architecture.
 3. Push test tags to Docker Hub and GHCR only after approval.
 4. Compare manifest platform sets and digests, anonymously pull Docker Hub, and
    run the offline suite against pulled images.
-5. Confirm the Docker Hub overview rendered and contains no secrets or internal
-   development details.
+5. Confirm the Docker Hub overview rendered—no secrets or internal development
+   details visible.
 
-Only after every applicable row is green should migration of any reference
-deployment be considered. Production migration is a separate, last operation.
+Only after every applicable row is green should reference deployment migration be considered. Production migration is separate and last.

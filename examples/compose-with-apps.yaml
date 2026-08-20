@@ -1,5 +1,5 @@
-# Same-project example with three popular notification workloads. Pin all images
-# to reviewed releases/digests in production; `latest` keeps this file readable.
+# Same-project stack with three common notification workloads. Pin all images
+# to tested digests in production; `latest` here is for readability only.
 services:
   postfix-m365-relay:
     image: docker.io/sg1888/postfix-m365-relay:latest
@@ -53,8 +53,8 @@ services:
     networks: [monitoring-internal, mail-relay]
 
 networks:
-  # Databases/backends can remain only on these application networks. Only the
-  # process that actually sends mail needs `mail-relay` membership.
+  # Databases/backends stay on their own networks. Only the mail-sending process
+  # needs to join `mail-relay`.
   grafana-internal:
     internal: true
   gitea-internal:
@@ -62,7 +62,7 @@ networks:
   monitoring-internal:
     internal: true
   mail-relay:
-    # Leave non-internal so the relay can reach Microsoft.
+    # Non-internal so the relay can reach Microsoft.
 
 volumes:
   mail-relay-state:

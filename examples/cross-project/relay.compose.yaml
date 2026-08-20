@@ -1,4 +1,4 @@
-# Create the shared network once before starting this separate relay project:
+# Create the shared network first (one-time):
 # docker network create --driver bridge --subnet 172.30.50.0/24 mail-relay
 services:
   postfix-m365-relay:

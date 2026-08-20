@@ -3,15 +3,16 @@
   Reverse everything setup-exchange.ps1 did to Exchange Online.
 
 .DESCRIPTION
-  Removes, in dependency order, only what the setup script creates:
+  Removes, in dependency order, the claims-less App RBAC objects created by the
+  setup script:
 
-    FullAccess        mailbox permission for the service principal
-    SendAs            recipient permission, if one was ever added
-    service principal Exchange's record of the application
-    SMTP AUTH         the per-mailbox override, back to tenant default
+    role assignment   Application SMTP.SendAsApp within the mailbox scope
+    management scope  optional; may be shared with another assignment
+    service principal optional; may be shared with another relay
+    SMTP AUTH         optional per-mailbox override, back to tenant default
 
   It does NOT touch the mailbox, the app registration, the enterprise
-  application, the certificate, or the admin consent. Those are shared with
+  application, or the certificate. Those can be shared with
   anything else using the same identity, and deleting an app registration
   destroys a credential that other systems may still hold.
 
@@ -27,7 +28,11 @@
 .PARAMETER RemoveServicePrincipal
   Also remove the Exchange service principal. Off by default: if a second
   project shares this application, removing it breaks that project too, and it
-  is the object every mailbox permission points at.
+  is the object every Exchange App RBAC assignment points at.
+
+.PARAMETER RemoveManagementScope
+  Also remove the named management scope after its role assignment is gone.
+  Off by default because another application role can reuse the same scope.
 
 .PARAMETER RestoreSmtpAuthDefault
   Set SmtpClientAuthenticationDisabled back to $null on the mailbox, so it
@@ -68,6 +73,9 @@
 param(
     [Parameter(Mandatory)][string]$Mailbox,
     [Parameter(Mandatory)][string]$ClientId,
+    [string]$ScopeName,
+    [string]$RoleAssignmentName,
+    [switch]$RemoveManagementScope,
     [switch]$RemoveServicePrincipal,
     [switch]$RestoreSmtpAuthDefault,
     [switch]$DisableSendFromAlias,
@@ -78,6 +86,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $script:Removed = @()
 $script:Skipped = @()
+$clientLabel = ($ClientId -split '-')[0]
+if (-not $ScopeName) { $ScopeName = "postfix-m365-relay-$clientLabel-mailboxes" }
+if (-not $RoleAssignmentName) { $RoleAssignmentName = "postfix-m365-relay-$clientLabel-smtp" }
 
 function Step { param($n, $t) Write-Host "`n=== $n. $t ===" -ForegroundColor Cyan }
 function Good { param($m) Write-Host "  ok      $m" -ForegroundColor Green }
@@ -109,59 +120,57 @@ else     { Warn "no Exchange service principal for $ClientId; permission cleanup
 # --- show before doing -------------------------------------------------------
 Step 1 "What exists now"
 
-$fullAccess = Get-MailboxPermission -Identity $Mailbox -ErrorAction SilentlyContinue |
-    Where-Object { $_.User -notlike 'NT AUTHORITY*' }
-$sendAs = Get-RecipientPermission -Identity $Mailbox -ErrorAction SilentlyContinue |
+$assignment = Get-ManagementRoleAssignment -Identity $RoleAssignmentName -ErrorAction SilentlyContinue
+$scope = Get-ManagementScope -Identity $ScopeName -ErrorAction SilentlyContinue
+$legacyFullAccess = Get-MailboxPermission -Identity $Mailbox -ErrorAction SilentlyContinue |
+    Where-Object { $_.User -notlike 'NT AUTHORITY*' -and $_.AccessRights -contains 'FullAccess' }
+$legacySendAs = Get-RecipientPermission -Identity $Mailbox -ErrorAction SilentlyContinue |
     Where-Object { $_.Trustee -notlike 'NT AUTHORITY*' }
 $cas = Get-CASMailbox -Identity $Mailbox -ErrorAction SilentlyContinue
 
-if ($fullAccess) { $fullAccess | ForEach-Object { Note "mailbox permission: $($_.User) -- $($_.AccessRights -join ',')" } }
-else             { Note "mailbox permission: none" }
-if ($sendAs)     { $sendAs     | ForEach-Object { Note "recipient permission: $($_.Trustee) -- $($_.AccessRights -join ',')" } }
-else             { Note "recipient permission: none" }
+if ($assignment) { Note "role assignment: $($assignment.Name) -- $($assignment.Role)" }
+else             { Note "role assignment: none named $RoleAssignmentName" }
+if ($scope)      { Note "management scope: $($scope.Name) -- $($scope.RecipientRestrictionFilter)" }
+else             { Note "management scope: none named $ScopeName" }
+if ($legacyFullAccess) { Warn "legacy FullAccess exists; not created or removed by the App RBAC workflow" }
+if ($legacySendAs)     { Warn "legacy SendAs exists; not created or removed by the App RBAC workflow" }
 Note "SmtpClientAuthenticationDisabled = $($cas.SmtpClientAuthenticationDisabled)"
 
-# --- 2. FullAccess -----------------------------------------------------------
-Step 2 "FullAccess mailbox permission"
+# --- 2. App RBAC role assignment --------------------------------------------
+Step 2 "Application SMTP.SendAsApp role assignment"
 
-if ($sp -and $fullAccess) {
-    $mine = $fullAccess | Where-Object { $_.User -like "*$($sp.DisplayName)*" -or $_.User -eq $sp.Identity }
-    if (-not $mine) {
-        Warn "no FullAccess entry matches this application."
-        Warn "Get-MailboxPermission prints DISPLAY NAMES, not GUIDs, so an entry that"
-        Warn "looks nothing like the Identity may still be the right one. Check by eye:"
-        $fullAccess | ForEach-Object { Warn "  $($_.User)" }
-    }
-    foreach ($entry in $mine) {
-        if (Confirm-Removal "FullAccess for $($entry.User) on $Mailbox") {
-            Remove-MailboxPermission -Identity $Mailbox -User $entry.User `
-                -AccessRights FullAccess -Confirm:$false | Out-Null
-            Good "removed FullAccess for $($entry.User)"
-            $script:Removed += "FullAccess ($($entry.User))"
-        }
+if ($assignment) {
+    if (Confirm-Removal "role assignment $RoleAssignmentName") {
+        Remove-ManagementRoleAssignment -Identity $assignment.Identity -Confirm:$false
+        Good "removed $RoleAssignmentName"
+        $script:Removed += "role assignment ($RoleAssignmentName)"
     }
 } else { Note "nothing to remove" }
 
-# --- 3. SendAs ---------------------------------------------------------------
-Step 3 "SendAs recipient permission"
+# --- 3. management scope -----------------------------------------------------
+Step 3 "Mailbox management scope"
 
-if ($sp -and $sendAs) {
-    foreach ($entry in $sendAs) {
-        if (Confirm-Removal "SendAs for $($entry.Trustee) on $Mailbox") {
-            Remove-RecipientPermission -Identity $Mailbox -Trustee $entry.Trustee `
-                -AccessRights SendAs -Confirm:$false | Out-Null
-            Good "removed SendAs for $($entry.Trustee)"
-            $script:Removed += "SendAs ($($entry.Trustee))"
-        }
+if (-not $RemoveManagementScope) {
+    Note "kept (pass -RemoveManagementScope only after checking other role assignments)"
+} elseif ($scope) {
+    $scopeUsers = Get-ManagementRoleAssignment -ErrorAction SilentlyContinue |
+        Where-Object { $_.CustomResourceScope -eq $ScopeName }
+    if ($scopeUsers) {
+        Warn "scope is still referenced by: $($scopeUsers.Name -join ', ')"
+        Warn "refusing to remove a scope that another role assignment uses"
+    } elseif (Confirm-Removal "management scope $ScopeName") {
+        Remove-ManagementScope -Identity $scope.Identity -Confirm:$false
+        Good "removed $ScopeName"
+        $script:Removed += "management scope ($ScopeName)"
     }
-} else { Note "nothing to remove" }
+} else { Note "none exists" }
 
 # --- 4. service principal ----------------------------------------------------
 Step 4 "Exchange service principal"
 
 if (-not $RemoveServicePrincipal) {
     Note "kept (pass -RemoveServicePrincipal to remove)"
-    Note "It is what every mailbox permission points at, and a second project"
+    Note "It is what every App RBAC assignment points at, and a second project"
     Note "sharing this application would lose access with it."
 } elseif ($sp) {
     if (Confirm-Removal "Exchange service principal $($sp.DisplayName)") {
@@ -202,13 +211,12 @@ if (-not $DisableSendFromAlias) {
 # --- 7. what this deliberately does not touch --------------------------------
 Step 7 "Left alone on purpose"
 
-Note "the mailbox itself, and its licence"
-Note "the app registration, its certificate, and the admin consent"
+Note "the mailbox itself, its shared/user type, group membership, and any license"
+Note "the app registration and its certificate"
 Note "the enterprise application"
 Note ""
 Note "To finish decommissioning, by hand, once nothing else uses the identity:"
-Note "  - App registrations > API permissions > remove SMTP.SendAsApp"
-Note "    (revoking consent alone is not enough -- remove the permission)"
+Note "  - confirm App registrations > API permissions remains empty for App RBAC"
 Note "  - Certificates & secrets > delete the certificate"
 Note "  - delete the app registration, then the mailbox"
 Note ""
@@ -233,4 +241,4 @@ if ($script:Skipped) {
 
 Write-Host ""
 Write-Host "Mail may keep working for up to 90 minutes. That is propagation delay," -ForegroundColor Yellow
-Write-Host "not a failed removal. Re-check with Get-MailboxPermission in two hours." -ForegroundColor Yellow
+Write-Host "not a failed removal. Re-run Test-ServicePrincipalAuthorization in two hours." -ForegroundColor Yellow

@@ -10,7 +10,7 @@ A standard Compose setup separates three persistence tiers:
 ```text
 postfix-m365-relay/
 ├── compose.yaml
-└── config/                         host bind mount at /config
+└── mail-relay/                     host bind mount at /config
     ├── mail-relay.conf             generated settings; mode 0600
     └── secrets/
         └── smtpd_users             optional device passwords; mode 0600

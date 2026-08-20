@@ -25,7 +25,7 @@ services:
     secrets:
       - smtpd_users
     volumes:
-      - ../config:/config
+      - ../mail-relay:/config
       - mail-relay-state:/var/lib/mail-relay
       - mail-relay-spool:/var/spool/postfix
     tmpfs:

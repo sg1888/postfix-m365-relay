@@ -6,21 +6,29 @@
   Does the tenant-side work that can be automated, checks each step, and prints
   the values to paste into config/mail-relay.conf.
 
-  It grants exactly what has been measured as necessary and nothing else:
+  It configures the current claims-less Exchange App RBAC path:
 
-    SMTP.SendAsApp    application permission (you consent in the portal)
-    service principal Exchange's record of the application
-    FullAccess        on the relay mailbox
+    service principal              Exchange's record of the Entra application
+    management scope               mailboxes in one dedicated group
+    Application SMTP.SendAsApp     SMTP submission within that scope
 
-  It does NOT grant SendAs, does NOT create an application access policy, and
-  does NOT create a management scope or role assignment. They are not part of
-  the documented minimum SMTP app-only permission model.
+  The app registration intentionally has no API permissions. In particular,
+  do not add the similarly named Office 365 Exchange Online application
+  permission SMTP.SendAsApp: Microsoft says that claim triggers an unnecessary
+  mailbox-permission check when App RBAC is used. No FullAccess or SendAs
+  mailbox permission is required by this path.
 
 .PARAMETER Mailbox
-  The relay mailbox. Must be a LICENSED REGULAR USER MAILBOX -- a shared mailbox
-  authenticates and then fails at submission with an error that reads like a
-  permissions problem, cannot carry a per-application From display name, and
-  cannot have an application access policy applied to it.
+  The relay mailbox. A purpose-built unlicensed shared mailbox is recommended.
+  Shared mailboxes need no separate license up to 50 GB unless licensed
+  archiving, hold, or advanced compliance features are required. A licensed
+  regular user mailbox remains supported but normally wastes a license here.
+
+.PARAMETER ScopeGroup
+  Identity or email address of a dedicated Exchange distribution group or
+  mail-enabled security group whose direct members are the mailboxes this app
+  may submit as. The script obtains its DistinguishedName itself; do not paste a
+  guessed DN into a filter.
 
 .PARAMETER ClientId
   Application (client) ID of the app registration. To share one registration
@@ -41,6 +49,7 @@
 
 .EXAMPLE
   .\setup-exchange.ps1 -Mailbox relay@example.com `
+      -ScopeGroup postfix-m365-relay-mailboxes@example.com `
       -ClientId 00000000-1111-2222-3333-444444444444 `
       -EnterpriseAppObjectId 55555555-6666-7777-8888-999999999999
 
@@ -52,14 +61,24 @@
 
   Enable the tenant audit log before you start, so changes can be timestamped:
     Set-AdminAuditLogConfig -UnifiedAuditLogIngestionEnabled $true
+
+.LINK
+  https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/smtp-app-rbac-onboarding
+.LINK
+  https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac
+.LINK
+  https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/test-serviceprincipalauthorization?view=exchange-ps
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Mailbox,
+    [Parameter(Mandatory)][string]$ScopeGroup,
     [Parameter(Mandatory)][string]$ClientId,
     [string]$EnterpriseAppObjectId,
     [string]$DisplayName = "Mail relay",
+    [string]$ScopeName,
+    [string]$RoleAssignmentName,
     [switch]$EnableSendFromAlias,
     [switch]$WhatIfOnly
 )
@@ -67,6 +86,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $script:Problems = @()
 $script:EnabledSendFromAlias = $false
+
+# Defaults include the first client-ID segment so two relay applications can
+# coexist without silently reusing one another's scope or assignment names.
+$clientLabel = ($ClientId -split '-')[0]
+if (-not $ScopeName) { $ScopeName = "postfix-m365-relay-$clientLabel-mailboxes" }
+if (-not $RoleAssignmentName) { $RoleAssignmentName = "postfix-m365-relay-$clientLabel-smtp" }
 
 function Step   { param($n, $t) Write-Host "`n=== $n. $t ===" -ForegroundColor Cyan }
 function Good   { param($m) Write-Host "  ok      $m" -ForegroundColor Green }
@@ -105,26 +130,30 @@ Step 2 "The mailbox"
 $mb = Get-Mailbox -Identity $Mailbox -ErrorAction SilentlyContinue
 if (-not $mb) {
     Bad "mailbox $Mailbox not found. Create it in the M365 admin centre first."
-    Manual "It must be a regular user mailbox with a licence (Exchange Online Plan 1 is enough)."
-    Manual "Block sign-in: app-only OAuth never signs in, so it costs nothing."
-    Manual "Use a purpose-built mailbox that receives no real mail -- the application"
-    Manual "will be able to read it, and FullAccess is required."
+    Manual "Recommended: create a purpose-built shared mailbox and block sign-in."
+    Manual "The shared mailbox needs no separate license up to 50 GB unless you"
+    Manual "enable a licensed archive, hold, or advanced compliance feature."
     exit 1
 }
 
-if ($mb.RecipientTypeDetails -eq 'UserMailbox') {
-    Good "RecipientTypeDetails = UserMailbox"
-} else {
-    Bad "RecipientTypeDetails = $($mb.RecipientTypeDetails). Must be UserMailbox."
-    Manual "Convert it:  Set-Mailbox -Identity $Mailbox -Type Regular"
-    Manual "A shared mailbox authenticates fine and then fails at submission with"
-    Manual "430 STOREDRV mailbox logon failure, which reads like a permissions fault."
-}
-
-if ($mb.SkuAssigned) { Good "licence assigned" }
-else {
-    Bad "no licence. Unlicensed mailboxes cannot use SMTP AUTH."
-    Manual "Assign one in the M365 admin centre, then re-run."
+switch ($mb.RecipientTypeDetails) {
+    'SharedMailbox' {
+        Good "RecipientTypeDetails = SharedMailbox (recommended)"
+        if ($mb.SkuAssigned) {
+            Warn "a license is assigned; it is unnecessary below 50 GB unless this"
+            Warn "mailbox uses licensed archive, hold, or advanced compliance features"
+        } else {
+            Good "no mailbox license assigned (supported for a shared mailbox up to 50 GB)"
+        }
+    }
+    'UserMailbox' {
+        Warn "RecipientTypeDetails = UserMailbox; supported, but a shared mailbox is recommended"
+        if ($mb.SkuAssigned) { Good "regular mailbox license assigned" }
+        else { Bad "an unlicensed UserMailbox is unsupported; convert it to SharedMailbox or license it" }
+    }
+    default {
+        Bad "RecipientTypeDetails = $($mb.RecipientTypeDetails). Use SharedMailbox or UserMailbox."
+    }
 }
 
 # --- SMTP AUTH ---------------------------------------------------------------
@@ -162,46 +191,118 @@ if ($sp) {
     Good "created -- Identity $($sp.Identity)"
 }
 
-# --- mailbox permission ------------------------------------------------------
-Step 5 "FullAccess on the mailbox"
+# --- group, scope, and App RBAC role ----------------------------------------
+Step 5 "Scoped Application SMTP.SendAsApp role"
 
-if ($sp) {
-    $existing = Get-MailboxPermission -Identity $Mailbox |
-        Where-Object { $_.User -notlike 'NT AUTHORITY*' -and $_.AccessRights -contains 'FullAccess' -and -not $_.Deny }
-
-    if ($existing) {
-        Good "already granted to: $($existing.User -join ', ')"
-        Good "(Get-MailboxPermission prints display names, not GUIDs -- compare names, not shapes)"
-    } elseif ($WhatIfOnly) {
-        Warn "would run: Add-MailboxPermission -Identity $Mailbox -User $($sp.Identity) -AccessRights FullAccess"
+$scopeGroupObject = Get-DistributionGroup -Identity $ScopeGroup -ErrorAction SilentlyContinue
+if (-not $scopeGroupObject) {
+    Bad "scope group $ScopeGroup was not found. Create a dedicated distribution"
+    Manual "or mail-enabled security group, then add $Mailbox as a direct member."
+} else {
+    Good "scope group = $($scopeGroupObject.PrimarySmtpAddress)"
+    $members = Get-DistributionGroupMember -Identity $scopeGroupObject.Identity -ResultSize Unlimited
+    $mailboxIsMember = $members | Where-Object {
+        $_.PrimarySmtpAddress -and $_.PrimarySmtpAddress.ToString() -ieq $mb.PrimarySmtpAddress.ToString()
+    }
+    if ($mailboxIsMember) {
+        Good "$Mailbox is a direct group member"
     } else {
-        Add-MailboxPermission -Identity $Mailbox -User $sp.Identity -AccessRights FullAccess -Confirm:$false | Out-Null
-        Good "granted"
-        Warn "This can take up to 90 minutes to take effect. A probe before then proves nothing."
+        Bad "$Mailbox is not a direct member of $($scopeGroupObject.PrimarySmtpAddress)"
+        Manual "Add-DistributionGroupMember -Identity '$($scopeGroupObject.Identity)' -Member '$Mailbox'"
+    }
+
+    # Microsoft documents MemberOfGroup using the group's actual Exchange DN.
+    # Doubling a single quote is OPATH escaping; interpolating an email address
+    # or a hand-built CN here is a common way to create a valid but empty scope.
+    $escapedGroupDn = $scopeGroupObject.DistinguishedName.Replace("'", "''")
+    $scopeFilter = "MemberOfGroup -eq '$escapedGroupDn'"
+    $scope = Get-ManagementScope -Identity $ScopeName -ErrorAction SilentlyContinue
+    if (-not $scope) {
+        if ($WhatIfOnly) {
+            Warn "would create management scope '$ScopeName' with $scopeFilter"
+        } else {
+            New-ManagementScope -Name $ScopeName -RecipientRestrictionFilter $scopeFilter | Out-Null
+            $scope = Get-ManagementScope -Identity $ScopeName
+            Good "created management scope $ScopeName"
+        }
+    } elseif (
+        $scope.RecipientRestrictionFilter -notmatch 'MemberOfGroup' -or
+        $scope.RecipientRestrictionFilter -notmatch [regex]::Escape($scopeGroupObject.DistinguishedName)
+    ) {
+        Bad "existing scope $ScopeName does not target this group's DistinguishedName; refusing to reuse it"
+    } else {
+        Good "management scope $ScopeName already exists"
+    }
+
+    $assignment = Get-ManagementRoleAssignment -Identity $RoleAssignmentName -ErrorAction SilentlyContinue
+    if (-not $assignment -and $scope -and $sp) {
+        if ($WhatIfOnly) {
+            Warn "would assign 'Application SMTP.SendAsApp' to $ClientId in scope '$ScopeName'"
+        } else {
+            New-ManagementRoleAssignment -Name $RoleAssignmentName `
+                -Role 'Application SMTP.SendAsApp' -App $ClientId `
+                -CustomResourceScope $ScopeName | Out-Null
+            $assignment = Get-ManagementRoleAssignment -Identity $RoleAssignmentName
+            Good "created role assignment $RoleAssignmentName"
+            Warn "Exchange authorization caches can take time; wait two hours before SMTP conclusions."
+        }
+    } elseif ($assignment) {
+        if ($assignment.Role -ne 'Application SMTP.SendAsApp') {
+            Bad "existing assignment $RoleAssignmentName has role $($assignment.Role), not Application SMTP.SendAsApp"
+        } elseif ($assignment.CustomResourceScope -ne $ScopeName) {
+            Bad "existing assignment $RoleAssignmentName uses scope $($assignment.CustomResourceScope), not $ScopeName"
+        } else {
+            Good "role assignment $RoleAssignmentName already exists"
+        }
+    }
+
+    if ($sp -and -not $WhatIfOnly) {
+        $authorization = Test-ServicePrincipalAuthorization -Identity $sp.Identity -Resource $Mailbox |
+            Where-Object { $_.RoleName -eq 'Application SMTP.SendAsApp' }
+        if ($authorization -and $authorization.InScope -eq $true) {
+            Good "Test-ServicePrincipalAuthorization: Application SMTP.SendAsApp InScope=True"
+        } else {
+            Warn "authorization test is not InScope=True yet. Recheck group membership,"
+            Warn "scope, and role assignment; if just changed, allow the two-hour cache window."
+        }
     }
 }
 
-# --- what must not be there --------------------------------------------------
-Step 6 "Check for things that should NOT exist"
+# --- legacy/additive grants --------------------------------------------------
+Step 6 "Check for legacy or additive grants"
 
 $policies = Get-ApplicationAccessPolicy -ErrorAction SilentlyContinue | Where-Object { $_.AppId -eq $ClientId }
 if ($policies) {
     Warn "$($policies.Count) application access policy/policies exist for this AppId:"
     $policies | ForEach-Object { Warn "  $($_.ScopeName) -- $($_.AccessRight)" }
-    Warn "Not required for SMTP. A RestrictAccess policy is a RESTRAINT, not a grant --"
-    Warn "deleting one WIDENS what the app may open, and several for one AppId union"
-    Warn "together. Check Test-ApplicationAccessPolicy returns Granted for $Mailbox."
+    Warn "Application Access Policies are superseded by App RBAC for this relay."
+    Warn "Do not delete one casually: Entra grants and App RBAC grants are additive,"
+    Warn "and changing a restraint can widen access. Audit it separately."
 } else {
-    Good "no application access policy -- correct"
+    Good "no legacy Application Access Policy found"
 }
 
-$roles = Get-ManagementRoleAssignment -ErrorAction SilentlyContinue |
-    Where-Object { $_.RoleAssigneeName -match [regex]::Escape($DisplayName) }
-if ($roles) {
-    Warn "management role assignment(s) found: $($roles.Name -join ', ')"
-    Warn "Application Mail.Send scopes GRAPH, not SMTP. Not needed here."
+$unexpectedRoles = Get-ManagementRoleAssignment -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.RoleAssigneeName -match [regex]::Escape($DisplayName) -and
+        $_.Name -ne $RoleAssignmentName
+    }
+if ($unexpectedRoles) {
+    Warn "additional application role assignment(s) found: $($unexpectedRoles.Name -join ', ')"
+    Warn "App RBAC and Entra API permissions are additive. Confirm each extra role"
+    Warn "is intended; this script requires only Application SMTP.SendAsApp."
 } else {
-    Good "no management role assignment -- correct"
+    Good "no additional App RBAC role assignments found for this display name"
+}
+
+$fullAccess = Get-MailboxPermission -Identity $Mailbox -ErrorAction SilentlyContinue |
+    Where-Object { $_.User -notlike 'NT AUTHORITY*' -and $_.AccessRights -contains 'FullAccess' -and -not $_.Deny }
+if ($fullAccess) {
+    Warn "FullAccess mailbox permission(s) exist: $($fullAccess.User -join ', ')"
+    Warn "The claims-less Application SMTP.SendAsApp path does not require FullAccess."
+    Warn "Review ownership before removing legacy access; this script will not remove it."
+} else {
+    Good "no FullAccess mailbox permission -- correct for claims-less App RBAC"
 }
 
 $sendAs = Get-RecipientPermission -Identity $Mailbox -ErrorAction SilentlyContinue |
@@ -237,18 +338,18 @@ if ($aliasConfig.SendFromAliasEnabled) {
 # --- what you still have to do by hand ---------------------------------------
 Step 8 "Manual steps -- these need a browser"
 
-Manual "1. App registration > API permissions > Add a permission"
-Manual "   > 'APIs my organization uses' tab (NOT Microsoft Graph)"
-Manual "   > Office 365 Exchange Online > Application permissions > SMTP.SendAsApp"
-Manual "   > Add, then GRANT ADMIN CONSENT. The row must read 'Granted'."
+Manual "1. App registration > API permissions: leave the application with NO"
+Manual "   API permissions. If Office 365 Exchange Online SMTP.SendAsApp was"
+Manual "   added for an older setup, remove it. App RBAC uses the Exchange role"
+Manual "   named 'Application SMTP.SendAsApp', not an Entra permission claim."
 Manual ""
 Manual "2. App registration > Certificates & secrets > Certificates > Upload"
 Manual "   Start the container once. Its log prints the PUBLIC certificate and"
 Manual "   SHA-1 thumbprint. Upload only that public PEM; the private key stays"
 Manual "   in the mail-relay-state volume."
 Manual ""
-Manual "3. Do NOT add Mail.Read or Mail.ReadWrite. Nothing here reads mail, and"
-Manual "   certificate rotation works with roles: [] -- measured."
+Manual "3. Do NOT add Mail.Read, Mail.ReadWrite, Mail.Send, or SMTP.SendAsApp"
+Manual "   under API permissions. The claims-less Outlook token has roles: []."
 Manual ""
 Manual "4. Do NOT assign users to the enterprise application. Client-credentials"
 Manual "   flows do not use interactive user assignments."
@@ -262,6 +363,9 @@ Write-Host "MAIL_RELAY_TENANT=$tenantId"
 Write-Host "MAIL_RELAY_CLIENT_ID=$ClientId"
 Write-Host "MAIL_RELAY_ENTERPRISE_APP_OBJECT_ID=$EnterpriseAppObjectId"
 Write-Host "MAIL_SEND_MAILBOX=$Mailbox"
+Write-Host "# Exchange App RBAC scope group: $ScopeGroup"
+Write-Host "# Exchange management scope: $ScopeName"
+Write-Host "# Exchange role assignment: $RoleAssignmentName"
 Write-Host "# Certificate thumbprint is derived from the certificate in the state volume."
 Write-Host "# SendFromAliasEnabled changed by this run: $script:EnabledSendFromAlias"
 Write-Host ""
@@ -272,5 +376,5 @@ if ($script:Problems) {
     exit 1
 }
 
-Write-Host "Tenant side is ready, subject to the manual steps in section 8." -ForegroundColor Green
+Write-Host "Tenant side is configured for claims-less Exchange App RBAC, subject to section 8." -ForegroundColor Green
 Write-Host "If you changed a permission just now, wait two hours before testing." -ForegroundColor Yellow

@@ -1,5 +1,5 @@
 # Complete Docker-only deployment. On first boot the container creates
-# ./config/mail-relay.conf from its documented sample, then waits until the
+# ./mail-relay/mail-relay.conf from its documented sample, then waits until the
 # administrator fills in the required values. The directory remains on the
 # host and survives container replacement.
 services:
@@ -8,14 +8,17 @@ services:
     container_name: postfix-m365-relay
     restart: unless-stopped
 
-    # `expose` documents the container port. It does not publish a host/LAN
-    # port; other containers must join `mail-relay` to connect.
+    # `expose` is documentation only. It records the listener port but does not
+    # publish it to the host or LAN (that is `ports:`), and it is not required
+    # for connectivity: containers on a shared network reach 2525 either way,
+    # and the image's Dockerfile already declares EXPOSE 2525. Other containers
+    # connect by joining a network the relay is on, not because of this line.
     expose:
       - "2525"
 
     volumes:
       # Human-edited settings and optional device-password source file.
-      - ./config:/config
+      - ./mail-relay:/config
       # Container engines do not automatically copy the server timezone. Set
       # TZ in mail-relay.conf, or intentionally enable this server-time mount:
       # - /etc/localtime:/etc/localtime:ro
@@ -24,8 +27,14 @@ services:
       - mail-relay-state:/var/lib/mail-relay
       - mail-relay-spool:/var/spool/postfix
 
-    # Access tokens, supervisor PIDs, sasldb2, and rendered CA material are
-    # deliberately ephemeral.
+    # tmpfs mounts this path in RAM, never on the host disk, and wipes it the
+    # moment the container stops. Live secrets and throwaway runtime state live
+    # here: OAuth access tokens, supervisor PIDs, the SASL user DB (sasldb2),
+    # and rendered CA material. Keeping them off disk means a stolen disk image
+    # or backup holds no usable credentials, and every restart regenerates them
+    # clean instead of trusting stale copies. The flags harden the mount:
+    # nosuid + noexec block privilege escalation and running binaries from it,
+    # and mode=0750 restricts access to the relay's own user/group.
     tmpfs:
       - /run/mail-relay:rw,nosuid,noexec,mode=0750
 

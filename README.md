@@ -122,10 +122,10 @@ delivery to Microsoft precisely zero percent more secure than it already is.
 ## Quick start: a private Docker relay
 
 This is how most people will run it — no published port, containers only. Create
-a config directory and bring up the [`compose.yaml`](compose.yaml):
+a mail-relay directory and bring up the [`compose.yaml`](compose.yaml):
 
 ```bash
-mkdir -p config
+mkdir -p mail-relay
 docker compose up -d
 docker compose logs -f postfix-m365-relay
 ```
@@ -145,7 +145,7 @@ services:
       - "2525"
 
     volumes:
-      - ./config:/config                       # human-edited settings live here
+      - ./mail-relay:/config                   # human-edited settings live here
       - mail-relay-state:/var/lib/mail-relay   # OAuth key + rotation state
       - mail-relay-spool:/var/spool/postfix    # deferred mail (survives restarts)
     tmpfs:
@@ -166,7 +166,7 @@ volumes:
     name: mail-relay-spool
 ```
 
-On first boot the container copies its sample to `./config/mail-relay.conf`,
+On first boot the container copies its sample to `./mail-relay/mail-relay.conf`,
 locks it down to `0600`, and **waits without opening SMTP** until you fill in the
 required values. Edit that file on the host:
 
@@ -192,6 +192,45 @@ minting a token every five minutes, and queues mail until the upload propagates.
 
 > Prefer `docker run`? See the [full run command](docs/NETWORKING.md). No port is
 > published in either local-network path.
+
+## Test that it actually works
+
+Before you wire up a single app, prove the relay reaches Microsoft. One command
+runs the same audit the container runs on its own every hour — and it sends a
+real test email end-to-end, then confirms Microsoft **accepted** it, not just
+that localhost took the handoff:
+
+```bash
+docker exec postfix-m365-relay /usr/local/libexec/mail-relay/verify-relay.sh
+```
+
+A healthy run ends with `healthy (0 warning(s))` and drops a
+"postfix-m365-relay hourly verification" message into your `MAIL_ADMIN_EMAIL`
+inbox. Go look — that inbox arrival is your proof mail is really flowing.
+
+If something's wrong, it doesn't just say "failed." It names **which** part broke
+and why, so you know exactly what to fix:
+
+```text
+FAILED relay:       SMTP listener does not answer on 2525
+FAILED token:       token expires too soon (unreadable s)
+FAILED certificate: OAuth certificate is expired or unreadable
+FAILED rotation:    last rotation event failed: ...
+```
+
+The most common first-run result is a **token** failure: the container minted its
+OAuth certificate but you haven't uploaded the public half to your Microsoft app
+registration yet, so no token can be issued. Upload it (the startup log printed
+the PEM and thumbprint), wait for propagation, and re-run. The command exits `0`
+when healthy and `1` when any category failed, so you can drop it into a script
+or CI check.
+
+Just want to sanity-check configuration without sending a live email? Skip the
+probe:
+
+```bash
+docker exec -e MAIL_VERIFY_SEND=no postfix-m365-relay /usr/local/libexec/mail-relay/verify-relay.sh
+```
 
 ## Wiring an application to the relay
 
@@ -316,7 +355,7 @@ services:
       MAIL_INBOUND_TLS: "off"        # legacy device speaks plaintext on the LAN
       MAIL_TRUSTED_NETWORKS: 192.0.2.50/32,192.0.2.51/32   # per-device /32s
     volumes:
-      - ./config:/config
+      - ./mail-relay:/config
       - mail-relay-state:/var/lib/mail-relay
       - mail-relay-spool:/var/spool/postfix
     tmpfs:
@@ -506,7 +545,7 @@ interchangeable and none of them is decoration:
 
 | Mount | Kind | Holds | Survives a container update? |
 |---|---|---|---|
-| `./config` | **bind mount** (host folder) | `mail-relay.conf`, device-password file | yes — it's your folder |
+| `./mail-relay` | **bind mount** (host folder) | `mail-relay.conf`, device-password file | yes — it's your folder |
 | `mail-relay-state` | **named volume** | OAuth private key + cert-rotation state | yes |
 | `mail-relay-spool` | **named volume** | Postfix queue / deferred mail | yes |
 | `/run/mail-relay` | **tmpfs** (RAM) | access tokens, `sasldb2`, rendered CA | no — wiped every restart, never hits disk |

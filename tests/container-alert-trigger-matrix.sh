@@ -43,7 +43,12 @@ docker run -d --name "$relay" --network "$network" --network-alias relay \
 for _ in {1..40}; do docker exec "$relay" bash -c 'exec 3<>/dev/tcp/127.0.0.1/2525' >/dev/null 2>&1 && break; sleep 1; done
 docker exec "$relay" bash -c 'exec 3<>/dev/tcp/127.0.0.1/2525' >/dev/null 2>&1
 
-verify() { docker exec "$relay" env "$@" /usr/local/libexec/mail-relay/verify-relay.sh >/dev/null 2>&1 || true; }
+# Keep the known-good fixture token explicit on every exec.  `docker exec`
+# inherits the container's original environment, but the entrypoint may load a
+# generated config between checks; making this path explicit prevents a later
+# fault injection (for example MAIL_RELAY_CERT_FILE=missing) from accidentally
+# turning the token check into a second, unrelated "token absent" incident.
+verify() { docker exec "$relay" env MAIL_TOKEN_FILE=/run/secrets/token.json "$@" /usr/local/libexec/mail-relay/verify-relay.sh >/dev/null 2>&1 || true; }
 event_seen() { EVENT=$1 STATUS=$2 FILE=$fixture/webhooks.jsonl python3 -c 'import json,os; assert any((d.get("event"),d.get("status"))==(os.environ["EVENT"],os.environ["STATUS"]) for d in map(json.loads,open(os.environ["FILE"])))'; }
 wait_event() {
   for _ in {1..20}; do event_seen "$1" "$2" && return; sleep 1; done

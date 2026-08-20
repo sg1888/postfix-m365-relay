@@ -2,7 +2,7 @@
 # Fast, network-free checks run before the comparatively expensive image build.
 # Keep the file lists explicit enough that new runtime scripts are visible in a
 # review. File enumeration uses POSIX find because hosted CI does not guarantee
-# ripgrep; the policy/documentation assertions below still use rg when present.
+# ripgrep; policy/documentation assertions therefore use POSIX grep as well.
 set -euo pipefail
 
 repo_files() {
@@ -39,17 +39,17 @@ fi
 # The mailbox authorization model is security-sensitive documentation-as-code.
 # These assertions guard the live-proven claims-less App RBAC design against an
 # accidental return to the older licensed-user + FullAccess instructions.
-rg -q "RecipientTypeDetails = SharedMailbox \(recommended\)" powershell/setup-exchange.ps1
-rg -q "New-ManagementScope" powershell/setup-exchange.ps1
-rg -q "Application SMTP.SendAsApp" powershell/setup-exchange.ps1
-rg -q "Test-ServicePrincipalAuthorization" powershell/setup-exchange.ps1
-if rg -q "Add-MailboxPermission" powershell/setup-exchange.ps1; then
+grep -Eq "RecipientTypeDetails = SharedMailbox \(recommended\)" powershell/setup-exchange.ps1
+grep -Eq "New-ManagementScope" powershell/setup-exchange.ps1
+grep -Eq "Application SMTP.SendAsApp" powershell/setup-exchange.ps1
+grep -Eq "Test-ServicePrincipalAuthorization" powershell/setup-exchange.ps1
+if grep -Eq "Add-MailboxPermission" powershell/setup-exchange.ps1; then
   echo 'setup script must not grant FullAccess in claims-less App RBAC' >&2
   exit 1
 fi
-rg -q "dedicated shared mailbox" README.md docs/MICROSOFT-SETUP.md
-rg -q "smtp-app-rbac-onboarding" docs/MICROSOFT-SETUP.md
-rg -q "application-rbac" docs/MICROSOFT-SETUP.md
+grep -Eq "dedicated shared mailbox" README.md docs/MICROSOFT-SETUP.md
+grep -Eq "smtp-app-rbac-onboarding" docs/MICROSOFT-SETUP.md
+grep -Eq "application-rbac" docs/MICROSOFT-SETUP.md
 
 # The existing toolchains include Ruby's YAML parser. Parsing catches
 # indentation damage without downloading another Python dependency.

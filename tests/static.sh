@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # Fast, network-free checks run before the comparatively expensive image build.
 # Keep the file lists explicit enough that new runtime scripts are visible in a
-# review, while using rg for discovery so additions under tests are not missed.
+# review. GitHub's hosted runner does not guarantee ripgrep, so use POSIX find
+# here; developers can still use rg for interactive discovery.
 set -euo pipefail
+
+repo_files() {
+  find "$@" -type f -print
+}
 
 # Keep this runner compatible with Bash 3.2, which has arrays but not `mapfile`.
 # Paths in this repository contain no whitespace, so word-splitting the rg
 # result is safe across supported development and CI toolchains.
-shell_files=($(rg --files build/postfix-m365-relay scripts tests | rg '\.sh$|/relay-users$' | sort -u))
+shell_files=($(repo_files build/postfix-m365-relay scripts tests | awk '/\.sh$|\/relay-users$/' | sort -u))
 bash -n "${shell_files[@]}"
 python3 -m py_compile scripts/refresh-smtp-token.py scripts/rotate-smtp-relay-cert.py \
-  $(rg --files tests | rg '\.py$')
+  $(repo_files tests | awk '/\.py$/')
 
 # The existing toolchains include Ruby's YAML parser. Parsing catches
 # indentation damage without downloading another Python dependency.
@@ -38,7 +43,7 @@ ruby -e '
     # Ignore a non-text file if a maintainer later adds an image fixture.
   end
   abort bad.join("\n") unless bad.empty?
-' $(rg --files | sort)
+' $(repo_files . | sort)
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git diff --check
 fi

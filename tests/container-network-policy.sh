@@ -35,6 +35,7 @@ start_relay() {
     -e MAIL_RELAY_CLIENT_ID=11111111-1111-1111-1111-111111111111 \
     -e MAIL_SEND_MAILBOX=relay-test@example.invalid \
     -e MAIL_SENDER_APP=app@relay.example.local \
+    -e MAIL_SENDER_ALLOWLIST=on \
     -e "MAIL_INBOUND_AUTH=$policy" -e MAIL_SUBNET=172.31.250.0/24 \
     -e MAIL_SMTPD_USERS_FILE=/run/secrets/smtpd_users \
     -e MAIL_VERIFY_SEND=no -e MAIL_TOKEN_ALERT_AFTER=99 \

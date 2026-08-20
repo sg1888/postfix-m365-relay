@@ -83,6 +83,31 @@ docker exec "$container" relay-admin users > "$fixture/relay-admin-users.log"
 grep -q 'config-printer@relay.example.local' "$fixture/relay-admin-users.log"
 echo 'ok first run generated a 0600 config, waited safely, and loaded literal special characters'
 
+# The public OAuth certificate must be exported to the host-editable /config
+# directory so the operator can upload it to Entra without `docker logs`. The
+# container has no network here, so the startup token never mints; the bootstrap
+# export is therefore expected to remain in place for retrieval.
+cert_export=$fixture/config/microsoft365-app-public-cert.pem
+thumb_export=$fixture/config/microsoft365-app-cert-thumbprint.txt
+for _attempt in {1..30}; do
+  [[ -f $cert_export && -f $thumb_export ]] && break
+  sleep 1
+done
+[[ -f $cert_export && -f $thumb_export ]]
+openssl x509 -in "$cert_export" -noout >/dev/null
+[[ $(docker exec "$container" stat -c %a /config/microsoft365-app-public-cert.pem) == 644 ]]
+grep -Eq '^[0-9A-F]{40}$' "$thumb_export"
+# Read logs from a file rather than piping into `grep -q`: grep exits on the
+# first match and the closed pipe makes `docker logs` die of SIGPIPE, which
+# pipefail would otherwise turn into a spurious test failure.
+docker logs "$container" > "$fixture/bootstrap.log" 2>&1
+grep -q 'ACTION REQUIRED.*upload this PUBLIC certificate' "$fixture/bootstrap.log"
+grep -q 'microsoft365-app-public-cert.pem' "$fixture/bootstrap.log"
+# The private key never leaves the state volume; only the public copy is exported.
+docker exec "$container" test ! -e /config/microsoft365-app-private-key.pem
+! grep -q 'PRIVATE KEY' "$cert_export"
+echo 'ok public OAuth certificate exported to /config for one-time Entra upload'
+
 # The host file survives forced replacement. An explicit Docker environment
 # value must override only its matching file value while all other file values
 # continue to load.

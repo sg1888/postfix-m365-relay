@@ -70,6 +70,7 @@ start_relay() {
     -e MAIL_UPSTREAM_CA_EXTRA_FILE=/run/secrets/upstream-ca.crt
     -e MAIL_TOKEN_FILE=/run/secrets/relay.json
     -e MAIL_INBOUND_AUTH=ip -e "MAIL_SENDER_MODE=$mode"
+    -e MAIL_SENDER_ALLOWLIST=on
     -e "MAIL_VERIFY_SEND=$verify_send" -e MAIL_VERIFY_DELIVERY_WAIT_SECONDS=20
     -e MAIL_TOKEN_LOOP_SECONDS=300 -e MAIL_ROTATION_LOOP_SECONDS=300 -e MAIL_VERIFY_LOOP_SECONDS=300
     -v "$fixture/relay.json":/run/secrets/relay.json:ro

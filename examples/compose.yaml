@@ -1,0 +1,34 @@
+# Minimal local-Docker posture. No host port is published.
+services:
+  postfix-m365-relay:
+    image: docker.io/sg1888/postfix-m365-relay:latest
+    # For local development instead, uncomment:
+    # build:
+    #   context: ..
+    #   dockerfile: build/postfix-m365-relay/Dockerfile
+    # Set TZ in /config/mail-relay.conf (most portable). On compatible servers you may
+    # instead bind-mount /etc/localtime:ro when TZ is intentionally omitted.
+    restart: unless-stopped
+    expose: ["2525"]
+    volumes:
+      - ../config:/config
+      - mail-relay-state:/var/lib/mail-relay
+      - mail-relay-spool:/var/spool/postfix
+      # When TZ is omitted, this optional server-timezone mount is honored:
+      # - /etc/localtime:/etc/localtime:ro
+    tmpfs:
+      - /run/mail-relay:mode=0750
+    networks: [mail-relay]
+    healthcheck:
+      test: ["CMD-SHELL", "printf 'QUIT\\r\\n' | nc -w 3 127.0.0.1 $${RELAY_PORT:-2525} | grep -q '^220 '"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+networks:
+  mail-relay:
+
+volumes:
+  mail-relay-state:
+  mail-relay-spool:

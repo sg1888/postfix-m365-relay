@@ -1,0 +1,96 @@
+#### This file is copied to /config/mail-relay.conf on first startup.
+#### Fill in the required values there. Environment variables are optional overrides;
+#### secret bytes must remain in files and are never accepted as variable values.
+
+#### Required: three Microsoft identifiers and at least one sender.
+MAIL_RELAY_TENANT=
+MAIL_RELAY_CLIENT_ID=
+MAIL_SEND_MAILBOX=
+MAIL_SENDER_APP=
+MAIL_SENDER_NAME_APP=Example application
+
+# Additional senders used by examples/compose-with-apps.yaml and the Authelia
+# wiring example. Uncomment only the applications you actually deploy.
+# MAIL_SENDER_GRAFANA=grafana@relay.example.local
+# MAIL_SENDER_NAME_GRAFANA=Grafana alerts
+# MAIL_SENDER_GITEA=gitea@relay.example.local
+# MAIL_SENDER_NAME_GITEA=Gitea notifications
+# MAIL_SENDER_ALERTMANAGER=alertmanager@relay.example.local
+# MAIL_SENDER_NAME_ALERTMANAGER=Prometheus Alertmanager
+# MAIL_SENDER_AUTHELIA=authelia@relay.example.local
+# MAIL_SENDER_NAME_AUTHELIA=Authelia
+
+#### Recommended: alerts, verification probes, and certificate-rotation proof mail.
+MAIL_ADMIN_EMAIL=
+
+#### Recorded for the one-time Exchange setup only. The container does not read it.
+MAIL_RELAY_ENTERPRISE_APP_OBJECT_ID=
+
+#### Sender behavior: collapse (default) or passthrough. Passthrough remains gated
+#### on the live alias gate in docs/TESTING.md; unlisted addresses always collapse.
+MAIL_SENDER_MODE=collapse
+MAIL_PASSTHROUGH_SENDERS=
+MAIL_SENDER_NAME_FALLBACK=Example notifications
+
+#### Relay defaults.
+MAIL_AUTH_MODE=microsoft-cert
+MAIL_RELAY_DOMAIN=relay.example.local
+MAIL_RELAY_HOSTNAME=postfix-m365-relay.relay.example.local
+RELAY_PORT=2525
+MAIL_UPSTREAM_HOST=smtp.office365.com
+MAIL_UPSTREAM_PORT=587
+
+#### secure verifies Microsoft's certificate; encrypt is compatibility-only.
+MAIL_UPSTREAM_TLS_SECURITY_LEVEL=secure
+
+#### Corporate TLS inspection only: mount the public inspection root, never its key.
+#### MAIL_UPSTREAM_CA_EXTRA_FILE=/run/secrets/corporate_smtp_ca
+#### Deferred messages and deferred bounces are retained for this long.
+MAIL_QUEUE_LIFETIME=12h
+MAIL_RELAY_MAX_SIZE=3m
+MAIL_RELAY_RATE_LIMIT=200
+
+#### IANA timezone used by Postfix. If omitted, /etc/localtime is used; see docs.
+TZ=UTC
+
+#### Warn when the immutable image's CA trust package is older than this.
+MAIL_CA_BUNDLE_MAX_AGE_DAYS=90
+
+#### OAuth client certificate lifecycle. The container derives the thumbprint.
+MAIL_CERT_VALIDITY_DAYS=730
+
+#### Blank means half of validity.
+MAIL_CERT_RENEW_AT_DAYS=
+MAIL_CERT_GRACE_DAYS=7
+
+#### Optional BYO first certificate; both are copied into the state volume at boot.
+# MAIL_RELAY_CLIENT_KEY_FILE=/run/secrets/oauth_client_key
+# MAIL_RELAY_CLIENT_CERT_FILE=/run/secrets/oauth_client_cert
+
+#### Published-device posture only.
+#### Options are: off | ip | smtp-auth | ip-or-auth | ip-and-auth
+MAIL_INBOUND_AUTH=ip
+
+#### Blank derives from auth policy; explicit values: off | may | require
+MAIL_INBOUND_TLS=
+MAIL_TRUSTED_NETWORKS=
+
+#### Required by auth-inclusive policies. One user:password per line.
+MAIL_SMTPD_USERS_FILE=/config/secrets/smtpd_users
+
+#### Optional BYO server certificate. If omitted while TLS is on, a separate
+#### self-signed certificate is generated. These paths are never Graph-rotated.
+MAIL_INBOUND_TLS_VALIDITY_DAYS=3650
+MAIL_INBOUND_TLS_RENEW_AT_DAYS=365
+# MAIL_INBOUND_TLS_CERT=/run/secrets/inbound_tls_cert
+# MAIL_INBOUND_TLS_KEY=/run/secrets/inbound_tls_key
+# For a CA-issued certificate, CERT should be a fullchain PEM: leaf first,
+# followed by intermediate issuers. Certbot's fullchain.pem is ready to use.
+
+#### Optional alert channels. Webhook bodies contain no credentials.
+MAIL_ALERT_WEBHOOK=
+MAIL_RELAY_PUSH_BASE=
+
+#### Any POSTFIX_name becomes `name = value`, except security-sensitive settings
+#### force-asserted by the managed block. Example:
+# POSTFIX_smtp_dns_support_level=dnssec

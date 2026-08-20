@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Deliberately tiny read-only support command. It lists principals from the
+# ephemeral database but can never create/delete them or reveal passwords.
+set -euo pipefail
+case "${1:-}" in
+  list) exec sasldblistusers2 -f /run/mail-relay/sasldb2 ;;
+  *) echo 'usage: relay-users list' >&2; exit 2 ;;
+esac

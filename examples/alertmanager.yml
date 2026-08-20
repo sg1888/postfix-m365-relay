@@ -1,0 +1,15 @@
+# Minimal Alertmanager configuration for the private Docker relay hop. Replace
+# the recipient before use and integrate the receiver into your real route tree.
+global:
+  smtp_smarthost: postfix-m365-relay:2525
+  smtp_from: alertmanager@relay.example.local
+  smtp_require_tls: false
+
+route:
+  receiver: email-operations
+
+receivers:
+  - name: email-operations
+    email_configs:
+      - to: operator@example.com
+        send_resolved: true

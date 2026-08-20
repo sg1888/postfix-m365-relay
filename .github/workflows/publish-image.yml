@@ -1,0 +1,140 @@
+name: publish image
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: postfix-m365-relay
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/postfix-m365-relay/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=default
+          cache-to: type=gha,mode=max,scope=default
+          provenance: true
+          sbom: true
+      - name: Assert arm64 runtime packages
+        run: |
+          image="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
+          docker run --rm --platform linux/arm64 --entrypoint /bin/bash "$image" -c \
+            "test \"\$(rpm -q --qf '%{VERSION}' sasl-xoauth2)\" = 0.27 && python3 -c 'import cryptography' && command -v saslpasswd2"
+      - name: Attest GHCR provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Print digest to pin
+        run: echo "MAIL_IMAGE=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
+
+  build-v2:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}-x86-64-v2
+            type=semver,pattern={{major}}.{{minor}}-x86-64-v2
+            type=semver,pattern={{major}}-x86-64-v2
+            type=raw,value=latest-x86-64-v2,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/postfix-m365-relay/Dockerfile
+          platforms: linux/amd64/v2
+          # EXPECT_ALMALINUX_ARCH prevents a superficially successful v2-tagged
+          # build from using the normal v3 base. This exact omission produced a
+          # glibc "CPU does not support x86-64-v3" failure during local testing.
+          build-args: |
+            BASE_IMAGE=almalinux/10-base:10
+            EXPECT_ALMALINUX_ARCH=x86_64_v2
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=v2
+          cache-to: type=gha,mode=max,scope=v2
+          provenance: true
+          sbom: true
+      - name: Assert x86-64-v2 runtime packages
+        run: |
+          image="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
+          docker run --rm --platform linux/amd64/v2 --entrypoint /bin/bash "$image" -c \
+            "test \"\$(rpm -q --qf '%{ARCH}' almalinux-release)\" = x86_64_v2 && \
+             test \"\$(rpm -q --qf '%{ARCH}' sasl-xoauth2)\" = x86_64_v2 && \
+             test \"\$(rpm -q --qf '%{VERSION}' sasl-xoauth2)\" = 0.27 && \
+             rpm -q --qf '%{RELEASE}' sasl-xoauth2 | grep -q '\\.alma_altarch' && \
+             python3 -c 'import cryptography' && command -v saslpasswd2"
+
+  dockerhub-description:
+    needs: [build, build-v2]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          readme-filepath: docs/DOCKERHUB.md
+          short-description: Self-contained Postfix app-only OAuth relay for Microsoft 365

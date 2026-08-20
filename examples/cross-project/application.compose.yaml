@@ -1,0 +1,29 @@
+# Separate application project. The database remains private; only the sending
+# application joins the externally created mail-relay network.
+services:
+  application:
+    image: registry.example.invalid/your-application:replace-with-a-pinned-tag
+    environment:
+      SMTP_HOST: postfix-m365-relay
+      SMTP_PORT: "2525"
+      SMTP_TLS: "false"
+      SMTP_FROM: application@relay.example.local
+    networks: [default, mail-relay]
+
+  database:
+    image: docker.io/library/postgres:latest
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/database_password
+    secrets: [database_password]
+    networks: [default]
+
+secrets:
+  database_password:
+    file: ./secrets/database_password
+
+networks:
+  default:
+    internal: true
+  mail-relay:
+    external: true
+    name: mail-relay

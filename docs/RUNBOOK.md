@@ -32,7 +32,7 @@ docker exec postfix-m365-relay postconf -n
 
 ## First boot
 
-1. Start with an empty `./config` bind and empty state volume.
+1. Start with an empty `./mail-relay` bind and empty state volume.
 2. Confirm `config/mail-relay.conf` is generated as `0600`, no SMTP listener is
    open, and logs name missing required fields.
 3. Edit the host file. Container proceeds on its own.

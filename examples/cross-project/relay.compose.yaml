@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     expose: ["2525"]
     volumes:
-      - ../../config:/config
+      - ../../mail-relay:/config
       - mail-relay-state:/var/lib/mail-relay
       - mail-relay-spool:/var/spool/postfix
     tmpfs:

@@ -20,7 +20,7 @@ Use the repository's root `compose.yaml`. First startup creates
 Edit it; the container detects a complete required block and starts.
 
 ```bash
-mkdir -p config
+mkdir -p mail-relay
 docker compose config
 docker compose up -d
 docker compose logs postfix-m365-relay

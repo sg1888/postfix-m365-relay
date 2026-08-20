@@ -33,7 +33,7 @@ Two facts combine into the failure:
 1. **AlmaLinux 10 / RHEL 10 raised their minimum to v3.** The entire userspace
    (including glibc) is compiled for v3, so on a sub-v3 CPU glibc aborts every
    process. AlmaLinux publishes an official **v2 rebuild**, which is why this
-   project also ships a `-x86-64-v2` tag — but there is **no v1** AlmaLinux 10,
+   project also ships an `alma-v2` tag — but there is **no v1** AlmaLinux 10,
    so the floor for any AlmaLinux-10 image is **v2 (needs SSE4.2)**.
 
 2. **"Modern CPU" does not guarantee v3.** Intel disables AVX2 on its budget
@@ -51,20 +51,23 @@ Docker's automatic selection works on **`os/architecture`** only — it chooses
 microarchitecture *level*. Docker Engine's default image store ignores amd64
 variant metadata and never reads `/proc/cpuinfo` to choose v2 over v3.
 
-That is precisely why the v2 build is published as a **separate tag**
-(`-x86-64-v2`) rather than bundled into `:latest` — bundling wouldn't auto-pick
-anyway. The user must choose the tag.
+That is precisely why the AlmaLinux v2 and v3 builds are published as **separate
+named tags** (`alma-v2`, `alma-v3`) rather than bundled into one auto-selecting
+tag — bundling wouldn't auto-pick anyway. And it is why the **default `:latest` is
+the universal Ubuntu build**: a v1-baseline image needs no micro-arch selection at
+all, so the default puller never hits this trap.
 
-## Choosing an image today (AlmaLinux builds)
+## Choosing an image
 
 | Your CPU / VM | Use |
 |---------------|-----|
-| Has AVX2 (most Core i-series, EPYC, modern server) | default `:latest` (v3) |
-| Has SSE4.2 but not AVX2 (many VMs, budget CPUs) | `:latest-x86-64-v2` |
-| Below SSE4.2 (bare `qemu64` VM) | neither works — raise the VM CPU model, or use the Ubuntu prototype below |
-| ARM (Raspberry Pi, ARM server) | default `:latest` (arm64 auto-selected) |
+| Anything (default) — any x86-64 incl. default-CPU VMs, budget chips, arm64 | `:latest` / `:ubuntu` (universal) |
+| Has AVX2, want the AlmaLinux build | `:alma-v3` (amd64 + arm64) |
+| Has SSE4.2 but not AVX2, want the AlmaLinux build | `:alma-v2` (amd64 only) |
 
-Quick check inside the machine:
+The default `:latest` runs everywhere, so most people never need to choose. The
+`alma-*` tags are opt-in for users who specifically want the AlmaLinux base. Quick
+capability check inside the machine:
 
 ```bash
 grep -o -m1 avx2 /proc/cpuinfo    # empty -> no AVX2 -> not v3-capable

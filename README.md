@@ -130,19 +130,13 @@ docker compose up -d
 docker compose logs -f postfix-m365-relay
 ```
 
-> [!IMPORTANT]
-> **Pick the right image for your CPU.** The default image needs a modern CPU
-> baseline (x86-64-v3 / AVX2). Many machines — especially **virtual machines**
-> (the default QEMU/KVM CPU hides host features) and budget CPUs (Celeron/Atom/
-> N-series, NAS boxes) — don't have it, and will crash at startup with
-> `CPU does not support x86-64-v3`. If that happens, use the broader **v2** image:
-> ```bash
-> echo 'MAIL_IMAGE=docker.io/sg1888/postfix-m365-relay:latest-x86-64-v2' > .env
-> docker compose up -d
-> ```
-> Check with `grep -o -m1 avx2 /proc/cpuinfo` (empty output → use the v2 image).
-> Copy [`.env.example`](.env.example) to get started, and see
-> [Base image & CPU compatibility](docs/BASE-IMAGE.md) for the full explanation.
+> [!NOTE]
+> **The default image runs anywhere — nothing to pick.** `:latest` is the
+> Ubuntu-based build and works on every x86-64 CPU, including **virtual machines**
+> with the default QEMU/KVM CPU and budget chips (Celeron/Atom/N-series, NAS
+> boxes), plus arm64. If you specifically want the optimized AlmaLinux builds,
+> `:alma-v3` (needs AVX2) and `:alma-v2` (needs SSE4.2, amd64-only) are available.
+> See [Base image & CPU compatibility](docs/BASE-IMAGE.md) for the details.
 
 A minimal `compose.yaml` looks like this:
 
@@ -607,8 +601,9 @@ cheap hardening you should keep. That's the whole storage story.
 
 Docker Hub is primary; GHCR is a mirror. Release CI publishes:
 
-- `linux/amd64` (x86-64-v3) and `linux/arm64` under normal tags;
-- `linux/amd64/v2` under tags ending `-x86-64-v2` for older CPUs.
+- `latest` / `ubuntu` — Ubuntu base, `linux/amd64` + `linux/arm64`, runs on any CPU;
+- `alma-v3` — AlmaLinux (x86-64-v3 / AVX2), `linux/amd64` + `linux/arm64`;
+- `alma-v2` — AlmaLinux (x86-64-v2 / SSE4.2), `linux/amd64` only, for older x86.
 
 Use a 64-bit OS on Raspberry Pi. 32-bit platforms are outside the v1 support
 contract. Pin a release digest after you evaluate it — tags are mutable.

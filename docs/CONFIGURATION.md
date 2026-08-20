@@ -336,5 +336,6 @@ Tier 2 works because sasldb2 rebuilds in `/run/mail-relay`.
 
 ## Images
 
-Use the normal tag for arm64 and x86-64-v3. Use `-x86-64-v2` for older x86.
-Docker Hub is primary; GHCR mirrors the release. Pin by digest after testing.
+The default `latest` (Ubuntu) runs on any x86-64 and arm64. For the AlmaLinux
+builds use `alma-v3` (AVX2) or `alma-v2` (SSE4.2, amd64 only). Docker Hub is
+primary; GHCR mirrors the release. Pin by digest after testing.

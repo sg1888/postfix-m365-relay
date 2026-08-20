@@ -39,7 +39,7 @@ scripts/release.sh major   # v1.0.0 -> v2.0.0  (breaking)
 scripts/release.sh 1.2.3   # release an explicit version
 ```
 
-The release workflow publishes standard tags with `linux/amd64` (x86-64-v3 baseline) and `linux/arm64`. Separately publishes matching `-x86-64-v2` tags built from AlmaLinux's official v2 base. Both Docker Hub and GHCR receive the same tags, provenance, and SBOM metadata.
+The release workflow publishes the default `latest` / `ubuntu` tags (Ubuntu base, `linux/amd64` + `linux/arm64`, runs on any CPU), plus opt-in AlmaLinux tags: `alma-v3` (x86-64-v3, `linux/amd64` + `linux/arm64`) and `alma-v2` (`linux/amd64/v2` from AlmaLinux's official v2 base). Each also gets version-pinned forms (`1.0.0`, `1.0.0-alma-v3`, `1.0.0-alma-v2`). Both Docker Hub and GHCR receive the same tags, provenance, and SBOM metadata.
 
 ## Verify published artifacts
 
@@ -49,7 +49,8 @@ A green build job doesn't guarantee success. Inspect and pull what users will ac
 docker buildx imagetools inspect docker.io/sg1888/postfix-m365-relay:1.0.0
 docker buildx imagetools inspect ghcr.io/sg1888/postfix-m365-relay:1.0.0
 docker pull docker.io/sg1888/postfix-m365-relay:1.0.0
-docker pull docker.io/sg1888/postfix-m365-relay:1.0.0-x86-64-v2
+docker pull docker.io/sg1888/postfix-m365-relay:1.0.0-alma-v3
+docker pull docker.io/sg1888/postfix-m365-relay:1.0.0-alma-v2
 ```
 
 Compare manifest platforms and digests, rerun the offline suite against pulled images, confirm v2 package architecture assertions, and verify the Docker Hub description renders from `docs/DOCKERHUB.md`. Record the immutable digest for operators to pin.

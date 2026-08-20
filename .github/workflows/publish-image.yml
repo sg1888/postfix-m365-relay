@@ -15,6 +15,9 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      # attest-build-provenance persists the attestation through the GitHub
+      # attestations API, which requires this scope in addition to id-token.
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3

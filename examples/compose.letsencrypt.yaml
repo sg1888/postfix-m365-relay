@@ -1,10 +1,10 @@
-# Overlay for a published relay with a Certbot-managed STARTTLS identity.
+# Overlay for a published relay using Certbot for STARTTLS.
 services:
   postfix-m365-relay:
     environment:
       MAIL_INBOUND_TLS_CERT: /etc/letsencrypt/live/smtp.example.com/fullchain.pem
       MAIL_INBOUND_TLS_KEY: /etc/letsencrypt/live/smtp.example.com/privkey.pem
     volumes:
-      # Mount the whole tree: live/ entries are symlinks into archive/. An
-      # individual file mount may retain an old inode after atomic renewal.
+      # Mount the whole /etc/letsencrypt tree: live/ entries are symlinks into
+      # archive/. Single-file mounts can stale after Certbot's atomic renewal.
       - /etc/letsencrypt:/etc/letsencrypt:ro

@@ -1,5 +1,5 @@
-# Separate application project. The database remains private; only the sending
-# application joins the externally created mail-relay network.
+# Separate application project. Database stays private; only the mail-sending
+# application joins the external mail-relay network.
 services:
   application:
     image: registry.example.invalid/your-application:replace-with-a-pinned-tag

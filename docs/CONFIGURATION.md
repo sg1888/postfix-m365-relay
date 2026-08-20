@@ -1,19 +1,15 @@
 # Configuration
 
-Start with the generated `/config/mail-relay.conf`. On an empty writable
-`/config`, first startup copies the image's fully commented sample and waits
-without opening SMTP until the required values below are present. Save the file
-in place; no container recreation is needed for that first transition.
+Start with the generated `/config/mail-relay.conf`. The first boot copies the
+fully commented sample to an empty writable `/config` and refuses SMTP traffic
+until you set the required values below. Save the file; no container restart needed.
 
-The file parser accepts only `MAIL_*`, `POSTFIX_*`, `TZ`, and `RELAY_PORT`. It
-treats values as literal data: it does not run shell expansion, command
-substitution, or backslash escapes. A variable explicitly supplied by Docker or
-an orchestrator wins over the file, including an explicitly empty value. Later
-file changes require a container restart because Postfix config and credentials
-are deliberately rendered once at boot.
+The parser accepts only `MAIL_*`, `POSTFIX_*`, `TZ`, and `RELAY_PORT` as literal
+values—no shell expansion, substitution, or escape sequences. Docker or orchestrator
+env vars override the file, including empty ones. File changes after boot don't take
+effect without a restart; config and credentials render once on startup, by design.
 
-Everything in this document is optional unless you choose the published-device
-posture.
+Everything here is optional unless you expose the relay publicly.
 
 ## Required and recommended values
 
@@ -26,8 +22,8 @@ posture.
 | `MAIL_SENDER_NAME_<KEY>` | no | forced display name for that sender |
 | `MAIL_ADMIN_EMAIL` | recommended | alert, verification, and rotation-proof recipient |
 
-`MAIL_RELAY_ENTERPRISE_APP_OBJECT_ID` is a record for the one-time PowerShell
-setup. The running container does not read it.
+`MAIL_RELAY_ENTERPRISE_APP_OBJECT_ID` is setup-time only. The running container
+doesn't touch it.
 
 ## General options
 
@@ -47,12 +43,10 @@ setup. The running container does not read it.
 | `MAIL_SENDER_NAME_FALLBACK` | `the relay` | name for a bare From address |
 | `TZ` | container `/etc/localtime` | IANA timezone used by Postfix and local-time tools |
 
-Container engines do not portably inherit the server's timezone. Set, for
-example, `TZ=America/New_York` for predictable behavior. If `TZ` is omitted,
-the standard C runtime uses `/etc/localtime`: bind-mount the server's
-`/etc/localtime` read-only if matching it is important. Without either choice,
-the image uses UTC. Relay audit prefixes deliberately remain UTC so incident
-timelines from multiple hosts can be compared safely.
+Container engines don't inherit your server's timezone. Set `TZ=America/New_York`
+to be explicit. Omit it and the C runtime tries `/etc/localtime`—bind-mount that
+if it matters. Neither and you get UTC. Audit prefixes stay UTC on purpose so
+incident timelines line up across hosts.
 
 ## Sender modes
 
@@ -64,9 +58,8 @@ MAIL_SENDER_BACKUP=backup@relay.example.local
 MAIL_SENDER_NAME_BACKUP=Backups
 ```
 
-Only configured `MAIL_SENDER_*` addresses may submit. Their envelope sender and
-header address become `MAIL_SEND_MAILBOX`; their display name is preserved or
-forced. This is the safe, measured mode.
+Only configured `MAIL_SENDER_*` addresses may submit; both envelope and header
+become `MAIL_SEND_MAILBOX`, display names preserved or forced. Safe and boring—high praise.
 
 ### Passthrough
 
@@ -75,17 +68,16 @@ MAIL_SENDER_MODE=passthrough
 MAIL_PASSTHROUGH_SENDERS=alerts@example.com,reports@example.com
 ```
 
-Allowlisted addresses remain unchanged. Every unlisted permitted sender still
-collapses to the main mailbox, so an alias mistake does not create a bounce
-pipeline. The addresses must be proxy aliases on that same mailbox.
+Allowlisted addresses pass through untouched. Everything else collapses to the
+main mailbox, so stray aliases don't spawn bounces. The addresses must be proxy
+aliases on that same mailbox.
 
-Do not call this verified until the SMTP XOAUTH2 app-only alias gate in
-`TESTING.md` has been observed against dedicated test objects.
-`SendFromAliasEnabled` is org-wide.
+Don't call this verified until you've tested the SMTP XOAUTH2 app-only alias gate
+in `TESTING.md` against dedicated test objects. `SendFromAliasEnabled` is org-wide.
 
-For fixed-name containers, multiple-host naming, unsupported senders, domain
-choices, mismatched envelope/header addresses, special characters, and complete
-alias requirements, see [SENDER-REWRITING.md](SENDER-REWRITING.md).
+Fixed-host naming, multi-host scenarios, unsupported senders, domain choices,
+envelope/header mismatches, special characters, and full alias requirements: see
+[SENDER-REWRITING.md](SENDER-REWRITING.md).
 
 ## Inbound policy
 
@@ -97,8 +89,8 @@ alias requirements, see [SENDER-REWRITING.md](SENDER-REWRITING.md).
 | `ip-or-auth` | trusted IPs or authenticated users | yes | `may` |
 | `ip-and-auth` | trusted IPs and authenticated users | yes | `require` |
 
-Loopback is always permitted so the in-container verifier can submit without a
-stored probe password. It is unreachable from outside the container.
+Loopback is always open so the in-container verifier can submit without storing
+a probe password. Nothing outside can reach it.
 
 Boot refuses these unsafe or contradictory combinations:
 
@@ -109,30 +101,27 @@ Boot refuses these unsafe or contradictory combinations:
 
 ### Legacy clients without TLS or SSL
 
-SASL without TLS is deliberately unsupported. PLAIN and LOGIN protect neither
-the username nor the password by themselves; they are safe here only because
-Postfix offers them after STARTTLS. The managed configuration always forces
-`smtpd_tls_auth_only=yes` in a SASL mode. Before STARTTLS, AUTH is absent from
-EHLO and an early AUTH command is rejected.
+SASL without TLS is not supported. PLAIN and LOGIN offer no protection on their
+own—they're safe here only because Postfix gates them behind STARTTLS. The managed
+config forces `smtpd_tls_auth_only=yes` for SASL. Before STARTTLS, AUTH is absent
+from EHLO and early AUTH commands are rejected.
 
-Use one of these patterns for an older printer, scanner, UPS, or appliance:
+Pick one of these patterns for older printers, scanners, UPS appliances, or other devices:
 
 - `ip`: all permitted clients are admitted by source IP and use no password;
 - `ip-or-auth`: a fixed legacy client is admitted by source IP without a
   password, while clients outside the allowlist must use STARTTLS plus SASL.
 
-Do not configure a SASL username or password on the legacy client. Use the
-narrowest possible `/32` address (or a tightly controlled device VLAN), bind
-the published port to one LAN address, and enforce the same source restriction
-in the firewall. The legacy client-to-relay hop is plaintext, although the
-relay-to-Microsoft hop still uses verified TLS. A legacy device across an
-untrusted network needs a local TLS-capable SMTP gateway; disabling
-TLS-before-AUTH is not an available compatibility option.
+Don't configure a SASL username or password on the legacy client. Use the narrowest
+possible `/32` address (or a tightly controlled VLAN), bind the port to one LAN
+address, and enforce the same source restriction in the firewall. The legacy-to-relay
+hop is plaintext; the relay-to-Microsoft hop always uses verified TLS. Devices across
+untrusted networks need a local TLS-capable SMTP gateway. TLS-before-AUTH is not
+negotiable.
 
-`smtp-auth` and `ip-and-auth` cannot serve a client that lacks STARTTLS because
-both policies require SASL. `MAIL_INBOUND_TLS=may` does not weaken this rule:
-it permits an allowlisted IP client to remain plaintext, but AUTH remains
-unavailable until STARTTLS completes.
+`smtp-auth` and `ip-and-auth` won't serve clients without STARTTLS—both require
+SASL. `MAIL_INBOUND_TLS=may` doesn't change that: an allowlisted IP can stay
+plaintext, but AUTH stays unavailable until STARTTLS completes.
 
 ### `off`
 
@@ -141,8 +130,7 @@ environment:
   MAIL_INBOUND_AUTH: off
 ```
 
-Use only for an unpublished Docker-network listener. `MAIL_TRUSTED_NETWORKS`
-must be empty.
+For unpublished Docker-network listeners only. `MAIL_TRUSTED_NETWORKS` must be empty.
 
 ### `ip`
 
@@ -154,8 +142,8 @@ environment:
   MAIL_TRUSTED_NETWORKS: 192.0.2.50/32
 ```
 
-Suitable for a fixed printer on a controlled VLAN. The device-to-relay message
-is plaintext; the upstream Microsoft hop always requires TLS.
+Fits a fixed printer on a controlled VLAN. Device-to-relay is plaintext;
+relay-to-Microsoft always uses TLS.
 
 Equivalent `docker run` additions:
 
@@ -176,8 +164,8 @@ environment:
 secrets: [smtpd_users]
 ```
 
-Every non-loopback client, including another Docker container, must STARTTLS and
-authenticate. IP membership buys nothing.
+Every non-loopback client, including other containers, must STARTTLS and
+authenticate. IP doesn't matter here.
 
 ### `ip-or-auth` (mixed fleet)
 
@@ -191,9 +179,9 @@ environment:
 secrets: [smtpd_users]
 ```
 
-The fixed printer at `.50` may send plaintext by IP. A roaming device outside
-that allowlist must STARTTLS and authenticate. Pre-STARTTLS EHLO must not show
-AUTH; after STARTTLS it must show exactly PLAIN and LOGIN.
+The printer at `.50` sends plaintext by IP. Roaming devices outside the allowlist
+must STARTTLS and authenticate. Pre-STARTTLS EHLO hides AUTH; after STARTTLS it
+shows PLAIN and LOGIN only.
 
 ### `ip-and-auth`
 
@@ -207,21 +195,20 @@ environment:
 secrets: [smtpd_users]
 ```
 
-Both gates must pass. A correct password from the wrong IP and a correct IP
-without a password are both rejected.
+Both gates must pass. Correct password from the wrong IP fails; correct IP with
+no password fails.
 
 ## Inbound TLS
 
-`off`, `may`, and `require` map to Postfix `none`, `may`, and `encrypt`.
-Whenever inbound SASL is enabled, `smtpd_tls_auth_only=yes` is force-asserted.
+`off`, `may`, and `require` map to Postfix `none`, `may`, and `encrypt`. SASL
+modes always force `smtpd_tls_auth_only=yes`.
 
-With no BYO files, the container creates a separate RSA-2048 self-signed server
-pair under `/var/lib/mail-relay/inbound-tls`. The OAuth Graph rotation code
-refuses paths outside `/var/lib/mail-relay/secrets`, so the lifecycles cannot
-cross. It is valid for 3,650 days by default and is automatically renewed 365
-days before expiry, using the same private key followed by `postfix reload`.
-Exact-certificate pinning may still require a client trust update at renewal;
-use an externally managed CA certificate where seamless public trust matters.
+Without BYO files, the container creates an RSA-2048 self-signed pair under
+`/var/lib/mail-relay/inbound-tls`. OAuth rotation refuses paths outside
+`/var/lib/mail-relay/secrets`, keeping lifecycles separate. It defaults to 3,650
+days valid and auto-renews 365 days before expiry, reusing the private key and
+running `postfix reload`. Exact-certificate pinning still needs client trust
+updates at renewal; use an externally managed CA where seamless trust matters.
 
 For BYO TLS:
 
@@ -234,16 +221,13 @@ secrets:
   - inbound_tls_key
 ```
 
-`MAIL_INBOUND_TLS_CERT` should point to a fullchain PEM when the issuer uses an
-intermediate CA: leaf certificate first, then intermediate issuer certificates.
-Certbot's `fullchain.pem` has exactly that shape. There is intentionally no
-separate chain variable; Postfix's similarly named `smtpd_tls_chain_files`
-expects private-key material as part of a replacement interface and is not an
-intermediates-only input.
+`MAIL_INBOUND_TLS_CERT` should be a fullchain PEM for issuers with intermediates:
+leaf first, then intermediates. Certbot's `fullchain.pem` has that shape. No
+separate chain variable intentionally—Postfix's `smtpd_tls_chain_files` expects
+private-key material, not just intermediates.
 
-Replace mounted files, then restart the container to validate and serve them
-deterministically.
-Do not weaken AlmaLinux crypto policy for TLS-1.0-only hardware; use IP policy.
+Replace mounted files and restart to validate them. Don't weaken AlmaLinux crypto
+policy for TLS-1.0 hardware—use IP policy instead.
 
 ## Certificates and loops
 
@@ -265,65 +249,57 @@ Do not weaken AlmaLinux crypto policy for TLS-1.0-only hardware; use IP policy.
 | `MAIL_ALERT_WEBHOOK` | empty; optional independent JSON incident receiver |
 | `MAIL_RUNBOOK_URL` | public project runbook URL used in notifications |
 
-Loop timing overrides are primarily for isolated tests. Rotation always stages,
-adds, waits for replication, proves token and delivery, swaps atomically,
-re-mints immediately, and retires the old key on a later run.
+Loop timing overrides are for isolated tests. Rotation stages, adds, waits for
+replication, proves token and delivery, swaps atomically, re-mints immediately,
+and retires the old key on the next run.
 
 ### What can expire during unattended operation
 
 - The OAuth access token is short-lived. The five-minute loop re-mints it when
-  fewer than 30 minutes remain; it is not a certificate and is never renewed on
-  a fixed 30-minute schedule.
-- The generated OAuth app certificate defaults to 730 days and attempts a
-  proven, staged rotation halfway through its life. If every app certificate
-  expires or external policy blocks Graph `addKey`, recovery requires an Entra
-  administrator; alerts are therefore essential.
-- The generated inbound STARTTLS certificate follows the independent 3,650/365
-  day lifecycle above. A BYO certificate is never overwritten: its CA/ACME or
-  secret-manager owner must replace it and restart the container. The verifier
-  and daily rotation check alert inside its renewal window.
-- Microsoft owns and rotates the certificate presented by
-  `smtp.office365.com`; there is no Microsoft leaf certificate to renew or pin
-  in this project. The `secure` default validates its chain, hostname, and
-  validity against the image CA bundle. `encrypt` remains an explicit
-  compatibility mode but does not authenticate the server.
-- CA roots, distro security packages, DNS, tenant permissions, mailbox licenses,
-  Conditional Access, SMTP AUTH settings, webhook credentials, disk capacity,
-  and system time can all change independently. No container can guarantee
-  years of truly zero maintenance. Rebuild/pull patched images regularly,
-  restart onto the reviewed digest, retain the state/spool volumes, and monitor
-  the hourly probes and rotation alerts.
+  fewer than 30 minutes remain—not a certificate, never renewed on a fixed schedule.
+- The OAuth app certificate defaults to 730 days and attempts staged rotation
+  halfway through. If it expires or external policy blocks Graph `addKey`,
+  recovery needs an Entra admin—alerts are non-optional.
+- The inbound STARTTLS certificate follows the independent 3,650/365 lifecycle.
+  BYO certificates are never overwritten; their CA/ACME owner must replace and
+  restart. The verifier and daily rotation alert inside the renewal window.
+- Microsoft owns the `smtp.office365.com` certificate; no leaf to pin here. The
+  `secure` default validates chain, hostname, and validity against the image CA
+  bundle. `encrypt` is a compatibility mode without server authentication.
+- CA roots, distro packages, DNS, tenant permissions, mailbox licenses,
+  Conditional Access, SMTP AUTH, webhook creds, disk, and time can all change
+  independently. No container runs zero-maintenance for years. Rebuild/pull
+  patched images, restart onto the reviewed digest, keep state/spool volumes,
+  and monitor hourly probes and rotation alerts.
 
-The verifier opens one durable incident when the image CA bundle exceeds 90
-days; repeated checks update that incident without duplicate notifications. A
-tested image replacement clears it with the same reference and elapsed
-duration. This does not mutate a running image. Increase the threshold only if
-your organization has a different documented patch cadence.
+The verifier opens one durable incident when the CA bundle exceeds 90 days;
+repeated checks update it without duplicates. A tested image replacement clears
+it with the same reference and elapsed duration. This doesn't mutate running
+images. Raise the threshold only if your org has a different documented patch
+cadence.
 
 ### Alert webhook and incident data
 
-`MAIL_ALERT_WEBHOOK` receives a JSON object for each incident open/recovery and
-one-time informational notice. It includes a schema version, status, severity,
-event, stable reference, relay name, UTC/local timestamps, timezone, duration,
-occurrence count, redacted evidence, likely causes, remediation, and runbook
-URL. Use a TLS URL in production and treat the endpoint itself as sensitive
-configuration. The relay never places this URL in notification bodies.
+`MAIL_ALERT_WEBHOOK` receives JSON for each incident open/recovery and one-time
+notices. It includes schema version, status, severity, event, stable reference,
+relay name, UTC/local timestamps, timezone, duration, count, redacted evidence,
+likely causes, remediation, and runbook URL. Use a TLS URL in production and
+treat the endpoint as sensitive. The relay never puts the URL in notification
+bodies.
 
-Email and webhook delivery are independent. Failed deliveries remain under the
-persistent state volume and retry with bounded backoff. Configure both when
-possible: email uses the same Postfix/OAuth route being monitored, while the
-webhook can still report that route's failure.
+Email and webhook delivery are independent. Failed deliveries persist and retry
+with bounded backoff. Configure both when possible: email uses the same Postfix/OAuth
+route you're watching, while webhooks can still report that route's failure.
 
 ### Corporate TLS inspection
 
-An inspecting firewall terminates TLS and can read the XOAUTH2 bearer token and
-message. If that is an accepted organizational tradeoff, mount its **public
-root CA certificate** and set `MAIL_UPSTREAM_CA_EXTRA_FILE` to that path. Boot
-rejects missing, malformed, expired, not-yet-valid, or private-key-bearing
-files. The runtime bundle contains both normal public roots and the corporate
-root, while `secure` still requires the replacement leaf certificate to match
+An inspecting firewall terminates TLS and reads XOAUTH2 tokens and message
+bodies. If your org accepts that tradeoff, mount its **public root CA** and
+point `MAIL_UPSTREAM_CA_EXTRA_FILE` there. Boot rejects missing, malformed,
+expired, not-yet-valid, or private-key files. The bundle contains public roots
+and the corporate root; `secure` still requires the leaf to match
 `smtp.office365.com`. Without explicit trust, inspection fails closed and mail
-defers for the configured queue lifetime.
+defers for the queue lifetime.
 
 ```yaml
 environment:
@@ -334,14 +310,14 @@ secrets:
 
 ## Mounted `main.cf` and `POSTFIX_*`
 
-Mount a base configuration at `/etc/postfix-m365-relay/main.cf`. It replaces the
-generated base. Then any environment variable `POSTFIX_<name>` becomes a lower-
-cased `name = value` through `postconf`.
+Mount a base configuration at `/etc/postfix-m365-relay/main.cf` to replace the
+generated base. Then `POSTFIX_<name>` env vars become lowercased `name = value`
+through `postconf`.
 
-Finally, the visible `postfix-m365-relay (managed)` block force-asserts the
-upstream OAuth settings, relay restrictions, sender guard and rewrites, local-
-delivery refusal, and all inbound SASL/TLS policy. A mounted file cannot turn
-the image into an open relay or expose AUTH before TLS.
+The visible `postfix-m365-relay (managed)` block force-asserts upstream OAuth,
+relay restrictions, sender guards and rewrites, local-delivery refusal, and all
+inbound SASL/TLS policy. A mounted file can't turn the image into an open relay
+or expose AUTH before TLS.
 
 ## Hardened read-only variant
 
@@ -356,10 +332,9 @@ volumes:
   - mail-relay-spool:/var/spool/postfix
 ```
 
-Tier 2 remains compatible because sasldb2 is rebuilt in `/run/mail-relay`.
+Tier 2 works because sasldb2 rebuilds in `/run/mail-relay`.
 
 ## Images
 
-Use the normal tag for arm64 and x86-64-v3. Use the matching
-`-x86-64-v2` tag for older x86 hardware. Docker Hub is primary and GHCR mirrors
-the same release. Pin by digest after testing.
+Use the normal tag for arm64 and x86-64-v3. Use `-x86-64-v2` for older x86.
+Docker Hub is primary; GHCR mirrors the release. Pin by digest after testing.

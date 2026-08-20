@@ -1,16 +1,16 @@
 # Wiring applications to the relay
 
-Sender address and display-name policy is covered separately in
-[SENDER-REWRITING.md](SENDER-REWRITING.md), including fixed application names
-such as `Diun [Server A]`, multi-host deployments, and alias passthrough.
+Sender address and display-name policy live in
+[SENDER-REWRITING.md](SENDER-REWRITING.md)—fixed names like `Diun [Server A]`,
+multi-host setups, and alias passthrough.
 
-Read [NETWORKING.md](NETWORKING.md) for complete same-project, cross-project,
-per-application-isolation, and published-LAN topologies. This document shows
-real application-side SMTP settings.
+See [NETWORKING.md](NETWORKING.md) for topology options: same-project,
+cross-project, per-app isolation, published LAN. This guide shows actual
+app-side SMTP settings.
 
 ## Shared application settings
 
-For the default private Docker posture:
+For default private Docker topology:
 
 ```text
 host: postfix-m365-relay
@@ -20,11 +20,11 @@ TLS/SSL: none
 From: one configured MAIL_SENDER_* address
 ```
 
-Do not use the Microsoft mailbox password and do not point applications at
-`smtp.office365.com`; the relay alone owns OAuth, verified upstream TLS, sender
-policy, and the persistent queue.
+Never use the Microsoft mailbox password or point apps at `smtp.office365.com`—the
+relay owns OAuth, verified TLS, sender policy, and the queue. Don't argue with
+this one.
 
-The sender keeps its existing network and additionally joins the relay network:
+The sender keeps its existing network and also joins the relay:
 
 ```yaml
 services:
@@ -62,14 +62,13 @@ MAIL_SENDER_GRAFANA=grafana@relay.example.local
 MAIL_SENDER_NAME_GRAFANA=Grafana alerts
 ```
 
-Use Grafana's test-notification function, then require `status=sent` in the
-relay log and confirm the recipient-visible name.
+Test with Grafana's built-in function. Require `status=sent` in the relay log
+and verify the recipient-visible name.
 
 ## Gitea
 
-Gitea 1.18+ supports Docker variables in the form
-`GITEA__section__SETTING`. Plain `smtp` is appropriate only on the private
-Docker hop shown here; USER and PASSWD are deliberately absent.
+Gitea 1.18+ takes Docker variables `GITEA__section__SETTING`. Plain `smtp`
+works only on private Docker; USER and PASSWD are intentionally absent.
 
 ```yaml
 services:
@@ -89,15 +88,13 @@ MAIL_SENDER_GITEA=gitea@relay.example.local
 MAIL_SENDER_NAME_GITEA=Gitea notifications
 ```
 
-Send a test from **Site Administration → Configuration → Mailer
-Configuration**. Older Gitea releases used a combined `HOST` setting; use the
-documentation for the exact version you run.
+Test from **Site Administration → Configuration → Mailer Configuration**. Older
+releases used combined `HOST`; check your version's docs.
 
 ## Prometheus Alertmanager
 
-Alertmanager reads SMTP settings from its YAML configuration rather than
-ordinary SMTP environment variables. Mount `examples/alertmanager.yml` and add
-the mail network:
+Alertmanager reads SMTP from YAML, not env vars. Mount `examples/alertmanager.yml`
+and add the mail network:
 
 ```yaml
 services:
@@ -116,8 +113,8 @@ global:
   smtp_require_tls: false
 ```
 
-No SMTP authentication fields are present. The plaintext setting is scoped to
-the private bridge; Microsoft submission remains verified TLS.
+No auth fields. Plaintext is scoped to the private bridge; Microsoft submission
+stays verified TLS.
 
 ```env
 MAIL_SENDER_ALERTMANAGER=alertmanager@relay.example.local
@@ -126,11 +123,9 @@ MAIL_SENDER_NAME_ALERTMANAGER=Prometheus Alertmanager
 
 ## Authelia
 
-Authelia notification messages can contain identity-verification and password-
-reset material, so its secure default should be preserved. Unlike the plaintext
-examples above, configure the relay's inbound side for STARTTLS with a trusted
-certificate. A public Certbot certificate or an internal CA trusted by Authelia
-works; do not set `tls.skip_verify`.
+Authelia sends identity-verification and password-reset data, so its secure
+default must hold. Configure inbound STARTTLS with a trusted cert. Certbot or
+an internal CA works; never set `tls.skip_verify`.
 
 Add these variables to an existing Authelia service:
 
@@ -160,8 +155,8 @@ MAIL_SENDER_NAME_AUTHELIA=Authelia
 
 Mount `/etc/letsencrypt:/etc/letsencrypt:ro` into the relay. If an internal CA
 is used instead, add its public root to Authelia's `certificates_directory`.
-Authelia performs an SMTP startup check; keep it enabled so a broken notifier is
-detected before a user needs a reset message.
+Authelia runs an SMTP startup check; keep it on so broken notifiers surface
+before a user needs a reset.
 
 ## Generic application
 
@@ -181,9 +176,9 @@ URL-style clients often accept:
 smtp://postfix-m365-relay:2525
 ```
 
-Applications use inconsistent names—SSL, TLS, STARTTLS, encryption—so verify
-their own documentation. If a client requires STARTTLS, set inbound TLS to
-`may` or `require`, provide a certificate it trusts, and test the handshake.
+Apps use inconsistent names (SSL, TLS, STARTTLS, encryption), so check their
+docs. If one needs STARTTLS, set inbound TLS to `may` or `require`, provide a
+trusted cert, and test.
 
 ## Add, apply, and verify
 
@@ -194,8 +189,8 @@ MAIL_SENDER_REPORTS=reports@relay.example.local
 MAIL_SENDER_NAME_REPORTS=Nightly reports [Primary]
 ```
 
-Recreate after changing environment, senders, device users, mounted Postfix
-configuration, or BYO TLS files:
+Recreate after any change to environment, senders, device users, mounted
+Postfix config, or BYO TLS:
 
 ```bash
 docker compose up -d --force-recreate postfix-m365-relay
@@ -206,7 +201,7 @@ For each application:
 
 1. Send a uniquely titled message from its built-in test function.
 2. Find the Postfix queue ID.
-3. Require `status=sent`, not merely local SMTP acceptance.
+3. Require `status=sent`, not just local SMTP acceptance.
 4. Confirm receipt and the exact display name, including punctuation/brackets.
 5. Try an unconfigured sender and confirm local rejection.
 

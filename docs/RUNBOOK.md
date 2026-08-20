@@ -10,18 +10,16 @@
 - Never expose the published-device posture to the Internet.
 
 Tenant authorization uses a dedicated shared mailbox and claims-less,
-group-scoped `Application SMTP.SendAsApp`. The app must have no API permissions,
-no `FullAccess`, and no mail-reading role. Follow
-[MICROSOFT-SETUP.md](MICROSOFT-SETUP.md); do not reconstruct the older
-licensed-user/FullAccess workflow from historical outage notes.
+group-scoped `Application SMTP.SendAsApp`; no API permissions, no `FullAccess`,
+no mail-reading role. Follow [MICROSOFT-SETUP.md](MICROSOFT-SETUP.md)—the
+older licensed-user/FullAccess workflow is dead; don't rebuild it.
 
 ## Normal state
 
-The container is running; `postfix` plus token, rotation, verify, and log-tail
-children exist under the Bash PID 1 supervisor. The SMTP listener answers on
-2525. `/run/mail-relay/relay.json` has more than 30 minutes of life soon after a
-mint. The deferred queue is normally empty. The OAuth certificate has ample
-life and the rotation log has no final `FAILED` outcome.
+Container's up: `postfix`, token, rotation, verify, and log-tail children under
+Bash PID 1. SMTP listener answers on 2525. `/run/mail-relay/relay.json` shows
+>30 minutes of life post-mint. Deferred queue is empty. OAuth cert has life left;
+rotation log shows no final `FAILED`.
 
 Quick check:
 
@@ -36,55 +34,47 @@ docker exec postfix-m365-relay postconf -n
 
 1. Start with an empty `./config` bind and empty state volume.
 2. Confirm `config/mail-relay.conf` is generated as `0600`, no SMTP listener is
-   open, and the log says which required fields are missing.
-3. Edit the generated host file. Watch the container proceed automatically.
-4. Observe RSA-4096 certificate generation and copy only the public PEM.
+   open, and logs name missing required fields.
+3. Edit the host file. Container proceeds on its own.
+4. Observe RSA-4096 generation; copy only the public PEM.
 5. Confirm the private key is `0600` in `/var/lib/mail-relay/secrets`.
 6. Upload the public certificate to the test app registration.
 7. Do not restart merely to get a token; the five-minute loop retries.
-8. After required propagation, observe a successful mint and queue drain.
+8. After propagation, observe successful mint and queue drain.
 9. Send two messages through different `MAIL_SENDER_*` values to one recipient
    and verify two distinct display names.
 
-Until step 9 is watched, first boot is not verified.
+Skip step 9 and first boot isn't verified—logs don't matter here.
 
 ## Lifecycle loops
 
-The token loop runs every five minutes and skips minting while at least 1,800
-seconds remain. After consecutive failures it alerts, while Postfix continues to
-queue.
+Token loop runs every five minutes, skips minting while ≥1,800 seconds remain.
+Alerts after consecutive failures; Postfix keeps queuing.
 
-Rotation runs once at supervisor startup and daily thereafter. The OAuth path
-checks expiry, stages RSA-4096 material, calls Graph `addKey`, waits for
-directory and token-service replication, sends a real proof message, swaps
-files atomically, re-mints immediately, and records the old key for later
-retirement. A separate inbound-TLS path renews only image-generated server
-certificates; neither path can touch the other's key directory.
+Rotation runs at startup and daily. OAuth path: check expiry, stage RSA-4096,
+call Graph `addKey`, wait for directory/token-service replication, send proof
+message, swap files atomically, re-mint immediately, record old key. Inbound-TLS
+path renews image-generated certs only; paths don't touch each other's keys.
 
-Verification runs hourly. With `MAIL_ADMIN_EMAIL`, it submits an end-to-end probe
-through loopback; otherwise it performs local checks only.
+Verification runs hourly. With `MAIL_ADMIN_EMAIL`, submits end-to-end probe via
+loopback; otherwise local checks only.
 
 ## Alerts and durable incidents
 
-Operational failures are incidents, not repeated free-form emails. The first
-failed observation creates an `open` notification with a stable `PMR-*`
-reference. Later observations update the durable occurrence count but do not
-send duplicate pages. The first healthy check emits one `recovered`
-notification with the same reference and total duration. Incident and pending
-delivery records live under `/var/lib/mail-relay/alerts` in the persistent state
-volume, so replacing the container does not forget an outage.
+Failures are incidents, not a mail stream. First failure opens `open` notification
+with stable `PMR-*` reference. Later failures bump occurrence count; no re-pages.
+First recovery emits `recovered` with reference and total duration. Incident and
+delivery records live in `/var/lib/mail-relay/alerts` (persistent volume)—
+replacing the container doesn't forget outages.
 
-Every email and webhook includes UTC and configured-`TZ` timestamps, relay
-identity, first/current observation, duration, non-secret evidence, likely
-causes, suggested actions, and this runbook link. Microsoft error codes,
-timestamps, Trace IDs, and Correlation IDs are useful evidence. Assertions,
-tokens, passwords, private keys, and credential-shaped values are redacted.
+Each email and webhook carries UTC and configured-`TZ` timestamps, relay
+identity, observations, duration, non-secret evidence, likely causes, and
+suggested actions. Keep Microsoft error codes, timestamps, Trace IDs, Correlation
+IDs. Redact assertions, tokens, passwords, private keys, and credentials.
 
-Email and `MAIL_ALERT_WEBHOOK` are attempted independently. An email-listener
-failure cannot prevent the webhook, and a webhook failure cannot prevent local
-queue submission. Only failed channels remain in the durable outbox. A later
-health/rotation pass retries them after persisted exponential delays of 30, 60,
-120 seconds, up to one hour. Local audit lines are always written.
+Email and `MAIL_ALERT_WEBHOOK` retry independently—neither blocks the other.
+Failed channels persist in outbox; later health/rotation passes retry with
+exponential backoff (30, 60, 120 sec, up to 1 hr). Audit lines always written.
 
 | Condition | Opens | Clears when |
 |---|---|---|
@@ -105,11 +95,10 @@ docker exec postfix-m365-relay find /var/lib/mail-relay/alerts -type f -maxdepth
 docker logs --since 1h postfix-m365-relay | grep 'alert-event:'
 ```
 
-An `incidents/<event>.json` file means the condition remains open. An `outbox`
-file means at least one configured notification channel has not acknowledged
-delivery. Do not delete these to silence an alert; correct the condition or
-deliberately remove the affected channel configuration and document that
-decision.
+An `incidents/<event>.json` file means the condition is still open. An `outbox`
+file means at least one configured notification channel hasn't acknowledged
+delivery. Do not delete these to silence an alert; fix the condition, or
+deliberately remove the affected channel configuration and write down why.
 
 ## Certificate operations
 
@@ -125,12 +114,12 @@ Force rotation only with test objects and an observed proof recipient:
 docker exec postfix-m365-relay relay-admin rotate --force
 ```
 
-Before and after, hash the inbound TLS certificate. It must be byte-identical.
-Watch addKey, both replication waits, proof send, swap, immediate token mint, and
-later removal; a zero exit code alone is insufficient evidence.
+Hash the inbound TLS cert before and after—must be byte-identical. Watch addKey,
+replication waits, proof send, swap, token mint, removal; exit code alone proves
+nothing.
 
-If the OAuth certificate is already expired, automated `addKey` cannot recover.
-Generate/upload a new first certificate manually using test-safe procedures.
+If OAuth cert is already expired, automated `addKey` can't help. Hand-generate
+and upload a new cert using test-safe procedures.
 
 ## Queueing and token failures
 
@@ -141,10 +130,9 @@ docker exec postfix-m365-relay python3 -c \
 docker logs --since 30m postfix-m365-relay
 ```
 
-Missing/expired token with AADSTS certificate errors usually means the public
-certificate is absent, expired, or not propagated. A token for Graph instead of
-`outlook.office365.com/.default` is refused at SMTP AUTH. Do not delete queued
-mail while diagnosing.
+Missing/expired token with AADSTS errors usually means the public cert is absent,
+expired, or not propagated. Graph tokens (not `outlook.office365.com/.default`)
+are refused at SMTP AUTH. Don't delete queued mail while diagnosing.
 
 Send a one-time channel test from a healthy isolated instance:
 
@@ -154,8 +142,7 @@ docker exec postfix-m365-relay \
   'Operator-requested notification channel test'
 ```
 
-Confirm the exact email and webhook receipt. This command does not open an
-incident and therefore does not produce a later recovery message.
+Confirm exact receipt. No incident opens, so no recovery message later.
 
 ## Supervisor failure drills
 
@@ -167,8 +154,8 @@ In an isolated test container:
 3. Run `docker stop` and confirm clean exit within the grace period.
 4. Queue a message, restart, and confirm the spool volume preserved it.
 
-These drills gate the Bash supervisor. If reaping or signal forwarding does not
-behave exactly this way, replace it with s6-overlay before release.
+These drills validate the Bash supervisor. If reaping or signal forwarding
+deviates, replace with s6-overlay before release.
 
 ## Device credentials
 
@@ -179,63 +166,54 @@ usernames:
 docker exec postfix-m365-relay relay-users list
 ```
 
-After removing one user, prove that credential fails and an untouched user still
-works. Confirm no password appears in `docker inspect`, logs, or state volume.
-For add/change/delete procedures and Docker Compose/Swarm secret rotation, use
-the complete [SECRETS.md](SECRETS.md#device-credentials) procedure.
+Prove removed credential fails and untouched users still work. Confirm no
+passwords in `docker inspect`, logs, or state. For add/change/delete and rotation,
+see [SECRETS.md](SECRETS.md#device-credentials).
 
 ## Inbound TLS replacement
 
-For self-signed TLS, a missing pair generates at boot and the daily loop renews
-the certificate 365 days before its default ten-year expiry. It keeps the same
-private key, retains `cert.pem.previous`, atomically replaces `cert.pem`, and
-reloads Postfix. For BYO files, the relay alerts inside the configured renewal
-window but never overwrites the external owner's files; replace the mounted
-cert/key and restart. Use
-`openssl s_client -starttls smtp` from a test client to observe the new
-certificate.
+Self-signed TLS: missing pair generates at boot, daily loop renews 365 days
+before expiry. Keeps same key, retains `cert.pem.previous`, replaces `cert.pem`
+atomically, reloads Postfix. BYO files: relay alerts in renewal window but never
+overwrites; replace mounted cert/key and restart. Use `openssl s_client -starttls
+smtp` to observe.
 
 ## Outbound TLS and corporate CA rotation
 
-The default `secure` policy requires the upstream certificate chain, validity,
-and `smtp.office365.com` name to verify. A failure here intentionally defers
-mail; inspect the queue and look for `certificate verification failed`, name-
-match, expiry, or trust errors in the Postfix log. Do not work around a trust
-problem by permanently setting `encrypt`.
+Default `secure` policy requires upstream chain, validity, and `smtp.office365.com`
+match. Failures defer mail intentionally; look for `certificate verification
+failed`, name-match, expiry, or trust errors in logs. Don't permanently set
+`encrypt` to work around trust problems.
 
-On a TLS-inspected network, confirm `MAIL_UPSTREAM_CA_EXTRA_FILE` contains only
-the approved public inspection root. During corporate CA rollover, place both
-old and new public roots in the PEM bundle, replace the mounted file, recreate
-the container, and observe `Verified TLS connection established` plus real test
-delivery. Remove the retired root only after the firewall cutover is observed.
-The relay never needs and will refuse a private CA key.
+TLS-inspected network: `MAIL_UPSTREAM_CA_EXTRA_FILE` must contain only the
+approved public inspection root. CA rollover: place both old and new roots in
+PEM, replace mounted file, recreate container, observe `Verified TLS connection
+established` and real delivery. Remove retired root only after firewall cutover.
+Relay refuses private CA keys.
 
-The public Internet root store comes from the image's `ca-certificates` RPM.
-It is not changed inside a running immutable container. When the 90-day image
-age warning fires, build or pull a current image, complete offline qualification,
-then recreate the container while retaining state and spool volumes.
+Public roots come from image's `ca-certificates` RPM; not updated in running
+containers. When 90-day warning fires, pull current image, qualify offline,
+recreate container (retain state/spool).
 
 With TLS `may` and auth enabled, test both sides: plaintext IP-authorized mail
 still works, while AUTH is absent before STARTTLS and PLAIN/LOGIN appear after.
 
 ## Sender and alias problems
 
-A local `Sender address rejected` means the application's envelope sender is not
-one of the `MAIL_SENDER_*` values. Add it and recreate the container.
+`Sender address rejected`: application's envelope sender isn't a `MAIL_SENDER_*`.
+Add it and recreate.
 
 Wrong display names usually mean the app emits a bare From and needs a matching
 `MAIL_SENDER_NAME_<KEY>` override.
 
-Passthrough alias failures must not be hidden by calling the feature verified.
-Confirm the alias belongs to the same test mailbox, org-wide alias sending is
-enabled, two hours have passed since that change, and the delivery was observed
-over SMTP XOAUTH2 app-only submission.
+Don't hide alias failures by calling the feature verified. Confirm: alias is in
+test mailbox, org-wide sending enabled, two hours passed since change, delivery
+observed via SMTP XOAUTH2 app-only.
 
 ## Rebuild and update
 
-Pull a release by digest, inspect release notes, and test on a separate instance
-before changing the pinned production digest. Published CI must observe package
-assertions on amd64-v3, amd64-v2, and arm64.
+Pull by digest, inspect notes, test separately before updating production. CI must
+observe assertions on amd64-v3, amd64-v2, arm64.
 
 ## Decommission
 

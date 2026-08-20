@@ -1,24 +1,23 @@
 # Docker and LAN networking
 
 The relay listens on TCP 2525 inside its container. How a sender reaches that
-listener determines the safe topology:
+listener decides which topology is safe:
 
 - Docker applications share a user-defined bridge and resolve
   `postfix-m365-relay` through Docker DNS; no host port is published.
 - Separate Compose projects share a pre-created external Docker network.
 - Printers and LAN devices require an explicitly interface-bound published port
-  plus a narrow IP allowlist, SMTP authentication, or both.
+  plus narrow IP allowlist, auth, or both.
 
-The outbound path is separate. The relay must resolve and reach
-`smtp.office365.com:587` plus Microsoft login and Graph HTTPS endpoints. An
-`internal: true` network blocks that egress when it is the relay's only network.
+Outbound is separate. The relay must reach `smtp.office365.com:587` plus
+Microsoft login and Graph HTTPS endpoints. `internal: true` network blocks
+egress when it's the relay's only network.
 
 ## Complete Docker-only deployment
 
-Use the repository's root `compose.yaml`. It bind-mounts `./config` at
-`/config`. First startup creates `config/mail-relay.conf` from the image sample
-and waits without opening SMTP. Edit the generated host file; the container
-detects a complete required block and starts automatically.
+Use the repository's root `compose.yaml`. First startup creates
+`config/mail-relay.conf` from the image sample and waits with SMTP closed.
+Edit it; the container detects a complete required block and starts.
 
 ```bash
 mkdir -p config
@@ -31,15 +30,14 @@ docker compose ps
 docker port postfix-m365-relay
 ```
 
-Environment variables remain optional higher-precedence overrides. A Compose
-`env_file:` is therefore available to automation but is not part of the normal
-installation and is never required.
+Environment variables override config as higher precedence. A Compose `env_file:`
+exists for automation but isn't required—it's not part of a normal install.
 
-The last command must print nothing. `expose: 2525` is metadata, not host
+The last command should print nothing. `expose: 2525` is metadata, not host
 publication.
 
-Any sender must join the relay's network. Docker DNS resolves the service name;
-do not use a container IP because it may change on recreation.
+Every sender needs the relay's network. Docker DNS resolves the service
+name—don't use container IPs; they change on recreation.
 
 ```text
 SMTP host       postfix-m365-relay
@@ -49,18 +47,16 @@ TLS             none on the private Docker hop
 From            one configured MAIL_SENDER_* address
 ```
 
-The private hop does not weaken the upstream connection. The relay separately
-requires verified STARTTLS and XOAUTH2 when submitting to Microsoft. If the
-Docker network crosses untrusted infrastructure, deliberately select inbound
-TLS and authentication instead.
+The private hop doesn't weaken upstream. The relay still requires verified
+STARTTLS and XOAUTH2 when submitting to Microsoft. For untrusted
+infrastructure, enable inbound TLS and auth instead.
 
 ## One project with popular notification containers
 
-`examples/compose-with-apps.yaml` contains the relay, Grafana, Gitea, and
-Prometheus Alertmanager. `examples/authelia.compose.yaml` shows the additional
-trusted-STARTTLS configuration appropriate for Authelia's security-sensitive
-notifications. Each application retains a private application network and also
-joins the mail network. Its database does not need mail membership.
+`examples/compose-with-apps.yaml` has the relay, Grafana, Gitea, and Prometheus
+Alertmanager. `examples/authelia.compose.yaml` adds trusted-STARTTLS for
+Authelia's security-sensitive notifications. Each app keeps its own private
+network plus the mail network. Databases don't belong there.
 
 Add matching relay senders:
 
@@ -75,14 +71,14 @@ MAIL_SENDER_AUTHELIA=authelia@relay.example.local
 MAIL_SENDER_NAME_AUTHELIA=Authelia
 ```
 
-A shared bridge allows member containers to initiate connections to other
-members. For stricter isolation, attach the relay to a different mail network
-for each application. Sender admission remains necessary in either topology.
+A shared bridge lets containers reach each other. For tighter isolation, give
+each app its own mail network and attach the relay to all. Either way, sender
+admission still applies.
 
 ## Separate Compose projects
 
-Create an ordinary external bridge once. Choose a private subnet that does not
-overlap existing Docker, LAN, or VPN ranges.
+Create one plain external bridge. Pick a private subnet that doesn't overlap
+existing Docker, LAN, or VPN ranges.
 
 ```bash
 docker network ls
@@ -101,8 +97,8 @@ networks:
     name: mail-relay
 ```
 
-The network must exist first. Services attached to it resolve the relay alias
-regardless of their Compose project names.
+Create it first. Services attached to it resolve the relay alias regardless of
+Compose project names.
 
 ```bash
 docker network inspect mail-relay
@@ -110,13 +106,13 @@ docker exec application getent hosts postfix-m365-relay
 docker exec application nc -vz postfix-m365-relay 2525
 ```
 
-Minimal application images may lack `getent` or `nc`; that is not itself a
-network failure. Prefer the application's built-in SMTP test when available.
+Minimal images may lack `getent` or `nc`—that's not a network failure. Prefer
+the app's built-in SMTP test when it exists.
 
 ## One mail network per application
 
-For stronger east-west isolation, create networks such as `grafana-mail` and
-`gitea-mail`. Attach the relay to both and each application only to its own:
+For stronger east-west isolation, create per-app networks like `grafana-mail` and
+`gitea-mail`. Attach the relay to both, each app to its own:
 
 ```yaml
 services:
@@ -132,24 +128,23 @@ services:
     networks: [gitea-internal, gitea-mail]
 ```
 
-Do not make both relay networks internal unless it also has a separate egress
-network. The entrypoint discovers each attached IPv4 subnet and permits those
-container sources in the Docker-only posture.
+Don't make both relay networks internal unless it has a separate egress network.
+The entrypoint discovers each attached IPv4 subnet and permits those container
+sources in Docker-only posture.
 
 ## LAN/device publication
 
-Only the device posture uses `ports`. Bind one actual host LAN address:
+Only device topology uses `ports`. Bind one actual host LAN address:
 
 ```yaml
 ports:
   - "192.0.2.10:2525:2525"
 ```
 
-Do not use `2525:2525` or `0.0.0.0:2525:2525`; those listen on every host
-interface. Enforce intended sources in the host/network firewall and in
-`MAIL_TRUSTED_NETWORKS`. Port-publishing and NAT implementations can influence
-the address Postfix observes, so inspect relay logs and test one allowed and one
-denied host before trusting IP policy.
+Never use `2525:2525` or `0.0.0.0:2525:2525`—they listen on all interfaces.
+Enforce sources in host/network firewall and `MAIL_TRUSTED_NETWORKS`. NAT can
+alter the observed address, so check logs and test allowed/denied hosts before
+trusting IP policy.
 
 ```env
 # Fixed device: address-based admission, plaintext on the LAN.
@@ -166,14 +161,14 @@ MAIL_TRUSTED_NETWORKS=192.0.2.48/28
 MAIL_SMTPD_USERS_FILE=/run/secrets/smtpd_users
 ```
 
-With password policies, AUTH is absent before STARTTLS and offered afterward as
-PLAIN/LOGIN. See `EXTERNAL-SENDERS.md` for every policy truth table.
+With password policies, AUTH isn't available until after STARTTLS, then
+PLAIN/LOGIN. See `EXTERNAL-SENDERS.md` for the full truth table.
 
-There is no SASL-without-TLS fallback. A plaintext-only legacy device must use
-IP admission with no credentials (`ip`, or the allowlisted branch of
-`ip-or-auth`) on a firewall-restricted trusted network. Do not use `smtp-auth`
-or `ip-and-auth` for such a device. Put a TLS-capable SMTP gateway beside a
-legacy device that cannot remain on a trusted local segment.
+No SASL-without-TLS fallback exists. A plaintext-only legacy device must use IP
+admission without credentials (`ip` or `ip-or-auth`) on a firewall-restricted
+trusted network. Never use `smtp-auth` or `ip-and-auth` for such a device. Put
+a TLS-capable gateway beside legacy hardware that can't stay on trusted local
+segment.
 
 ## Certbot-managed inbound STARTTLS
 
@@ -187,17 +182,16 @@ volumes:
   - /etc/letsencrypt:/etc/letsencrypt:ro
 ```
 
-Mount the full tree because `live/` entries are symlinks into `archive/`. After
-a successful renewal, restart only the relay so boot validation checks the new
-pair before Postfix accepts mail:
+Mount the full tree—`live/` entries are symlinks into `archive/`. After
+renewal, restart the relay so boot validation checks the new pair before
+Postfix takes mail:
 
 ```bash
 certbot renew --deploy-hook 'docker compose restart postfix-m365-relay'
 ```
 
-The OAuth state and Postfix spool persist through restart. This certificate is
-only the device-facing server identity; Entra app-certificate rotation never
-touches it.
+OAuth state and Postfix spool persist across restart. This is only the
+device-facing identity; Entra app-certificate rotation leaves it alone.
 
 ## Troubleshooting path
 
@@ -210,7 +204,7 @@ docker exec postfix-m365-relay postqueue -p
 docker compose logs --tail 200 postfix-m365-relay
 ```
 
-- DNS failure from an app: app and relay do not share the same network/alias.
+- DNS failure: app and relay don't share the same network/alias.
 - Connection refused: relay is unhealthy, still starting, or port is wrong.
 - `Sender address rejected`: envelope sender is missing from `MAIL_SENDER_*`.
 - Local acceptance followed by a queue entry: app networking worked; inspect

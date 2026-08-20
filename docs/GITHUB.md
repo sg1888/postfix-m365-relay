@@ -1,10 +1,6 @@
 # GitHub repository guide
 
-This repository is the public source for `sg1888/postfix-m365-relay`, a
-Microsoft 365-only SMTP relay image. The GitHub repository contains the image
-source, public configuration examples, tests, and operational documentation.
-It does not contain tenant credentials, private keys, mailbox exports, outage
-notes, or private deployment history.
+Public source for `sg1888/postfix-m365-relay`, a Microsoft 365-only SMTP relay image. This repository holds the source, configuration examples, tests, and operational docs. It does not hold tenant credentials, private keys, mailbox exports, outage notes, or deployment history.
 
 ## Clone and inspect
 
@@ -14,40 +10,30 @@ cd postfix-m365-relay
 git log --oneline --decorate -n 5
 ```
 
-Start with [README.md](../README.md), then use the index there to choose the
-installation, Microsoft setup, networking, secrets, and testing guide.
+Start with [README.md](../README.md), then use its index to pick the installation, Microsoft setup, networking, secrets, and testing guide you need.
 
 ## GitHub Actions
 
-Pull requests run the static checks, container tests, and image build. A tag
-matching `v*` runs the release workflow and publishes the multi-architecture
-image to Docker Hub and GHCR. The workflow never reads a local `.env` file or
-repository copy of a private key.
+Pull requests run static checks, container tests, and image builds. A tag matching `v*` triggers the release workflow and publishes the multi-architecture image to Docker Hub and GHCR. The workflow never reads a local `.env` file or repository copy of a private key.
 
-The Docker Hub publish job requires these GitHub repository secrets:
+Docker Hub publishing needs these GitHub repository secrets:
 
 - `DOCKERHUB_USERNAME`
 - `DOCKERHUB_TOKEN` (a Docker Hub access token, not the account password)
 
-GHCR uses the workflow-provided `GITHUB_TOKEN`. Configure package visibility
-and repository permissions in GitHub before the first release. See
-[RELEASING.md](RELEASING.md) for the complete release checklist.
+GHCR uses the workflow-provided `GITHUB_TOKEN`. Configure package visibility and repository permissions in GitHub before your first release. See [RELEASING.md](RELEASING.md) for the complete release checklist.
 
 ## Local contribution gate
 
-Run the focused checks before opening a pull request:
+Run these checks before opening a pull request:
 
 ```bash
 ./tests/static.sh
 ./tests/run-offline.sh postfix-m365-relay:test
 ```
 
-The full offline runner uses disposable containers and reserved example
-identities. It must not be pointed at a production relay or mailbox. Live
-Microsoft tests are deliberately separate and require explicit operator
-approval; follow [TESTING.md](TESTING.md).
+The offline runner uses disposable containers and reserved example identities. Don't point it at production relays or mailboxes. Live Microsoft tests are separate and require explicit operator approval; follow [TESTING.md](TESTING.md).
 
 ## Reporting a security issue
 
-Do not open a public issue containing a token, private key, SMTP transcript, or
-tenant-specific identifier. Follow [SECURITY.md](../SECURITY.md) instead.
+Don't open a public issue with a token, private key, SMTP transcript, or tenant-specific identifier. Use [SECURITY.md](../SECURITY.md) instead.

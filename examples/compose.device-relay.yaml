@@ -1,25 +1,24 @@
-# Complete published-device posture: trusted LAN only. Replace every TEST-NET
-# address before use and never expose this listener to the Internet.
+# Device relay: trusted LAN only. Replace all TEST-NET addresses and never expose
+# this listener to the Internet.
 services:
   postfix-m365-relay:
     image: docker.io/sg1888/postfix-m365-relay:latest
     container_name: postfix-m365-relay
     restart: unless-stopped
 
-    # Syntax is HOST_LAN_IP:HOST_PORT:CONTAINER_PORT. Never shorten this to
-    # 2525:2525, which publishes on every interface. Host port 587 may replace
-    # the middle 2525 for a device that insists on the submission port.
+    # Format is HOST_LAN_IP:HOST_PORT:CONTAINER_PORT. Don't shorten to 2525:2525
+    # (that opens every interface). Use 587 if your device demands the submission port.
     ports:
       - "192.0.2.10:2525:2525"
 
     environment:
-      # Both source IP and a per-device password are required in this example.
+      # This example requires both source IP and per-device password.
       MAIL_INBOUND_AUTH: ip-and-auth
       MAIL_INBOUND_TLS: require
       MAIL_TRUSTED_NETWORKS: 192.0.2.50/32,192.0.2.51/32
       MAIL_SMTPD_USERS_FILE: /run/secrets/smtpd_users
-      # Omit these two paths to use the separately generated self-signed server
-      # certificate. For Certbot, see compose.letsencrypt.yaml.
+      # Skip these to use the auto-generated self-signed cert. See
+      # compose.letsencrypt.yaml for Certbot integration.
       # MAIL_INBOUND_TLS_CERT: /etc/letsencrypt/live/smtp.example.com/fullchain.pem
       # MAIL_INBOUND_TLS_KEY: /etc/letsencrypt/live/smtp.example.com/privkey.pem
 
@@ -46,7 +45,7 @@ secrets:
 
 networks:
   mail-relay:
-    # Ordinary bridge: the relay still needs outbound Microsoft connectivity.
+    # Standard bridge; the relay needs outbound Microsoft access.
 
 volumes:
   mail-relay-state:

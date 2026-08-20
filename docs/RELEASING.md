@@ -28,6 +28,17 @@ git tag -s v1.0.0 -m 'postfix-m365-relay v1.0.0'
 git push origin v1.0.0
 ```
 
+Or use `scripts/release.sh`, which computes the next version from the newest
+`v*` tag, gates on a clean `main` (and green CI when `gh` is installed), then
+pushes the branch and a signed tag:
+
+```bash
+scripts/release.sh patch   # v1.0.0 -> v1.0.1  (fix)
+scripts/release.sh minor   # v1.0.0 -> v1.1.0  (feature)
+scripts/release.sh major   # v1.0.0 -> v2.0.0  (breaking)
+scripts/release.sh 1.2.3   # release an explicit version
+```
+
 The release workflow publishes standard tags with `linux/amd64` (x86-64-v3 baseline) and `linux/arm64`. Separately publishes matching `-x86-64-v2` tags built from AlmaLinux's official v2 base. Both Docker Hub and GHCR receive the same tags, provenance, and SBOM metadata.
 
 ## Verify published artifacts

@@ -39,7 +39,10 @@ fi
 # The mailbox authorization model is security-sensitive documentation-as-code.
 # These assertions guard the live-proven claims-less App RBAC design against an
 # accidental return to the older licensed-user + FullAccess instructions.
-grep -Eq "RecipientTypeDetails = SharedMailbox \(recommended\)" powershell/setup-exchange.ps1
+# The script accepts both licensed and shared mailboxes; the public guidance
+# makes the shared-mailbox posture the recommendation. Check the executable
+# mailbox-type guard here and the recommendation in the docs below.
+grep -Eq "RecipientTypeDetails.*UserMailbox" powershell/setup-exchange.ps1
 grep -Eq "New-ManagementScope" powershell/setup-exchange.ps1
 grep -Eq "Application SMTP.SendAsApp" powershell/setup-exchange.ps1
 grep -Eq "Test-ServicePrincipalAuthorization" powershell/setup-exchange.ps1

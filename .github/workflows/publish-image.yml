@@ -9,7 +9,11 @@ env:
   IMAGE_NAME: postfix-m365-relay
 
 jobs:
-  build:
+  # Default image. Ubuntu is the x86-64 v1 baseline, so one manifest runs on every
+  # amd64 CPU (including default-CPU VMs) plus arm64 — no micro-arch tag split. It
+  # owns the unsuffixed tags: latest, {{version}}, {{major}}.{{minor}}, {{major}},
+  # and the moving `ubuntu` alias.
+  build-ubuntu:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -42,7 +46,75 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=semver,pattern={{version}}-ubuntu
+            type=semver,pattern={{major}}.{{minor}}-ubuntu
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=raw,value=ubuntu,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/postfix-m365-relay/Dockerfile.ubuntu
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=ubuntu
+          cache-to: type=gha,mode=max,scope=ubuntu
+          provenance: true
+          sbom: true
+      - name: Assert runtime packages (amd64 native, arm64 emulated)
+        run: |
+          image="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
+          for platform in linux/amd64 linux/arm64; do
+            docker run --rm --platform "$platform" --entrypoint /bin/bash "$image" -c \
+              "test \"\$(dpkg-query -W -f='\${Version}' sasl-xoauth2 | cut -d- -f1)\" = 0.27 && \
+               python3 -c 'import cryptography' && command -v saslpasswd2"
+          done
+      - name: Attest GHCR provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Print digest to pin
+        run: echo "MAIL_IMAGE=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
+
+  # Optimized AlmaLinux build (x86-64-v3 baseline; needs AVX2) plus arm64. Opt-in
+  # via the moving `alma-v3` tag and versioned `-alma-v3` tags. Never claims the
+  # unsuffixed/latest tags.
+  build-alma-v3:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}-alma-v3
+            type=semver,pattern={{major}}.{{minor}}-alma-v3
+            type=semver,pattern={{major}}-alma-v3
+            type=raw,value=alma-v3,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
       - id: build
         uses: docker/build-push-action@v6
         with:
@@ -52,8 +124,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=default
-          cache-to: type=gha,mode=max,scope=default
+          cache-from: type=gha,scope=alma-v3
+          cache-to: type=gha,mode=max,scope=alma-v3
           provenance: true
           sbom: true
       - name: Assert arm64 runtime packages
@@ -67,10 +139,11 @@ jobs:
           subject-name: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
-      - name: Print digest to pin
-        run: echo "MAIL_IMAGE=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
 
-  build-v2:
+  # AlmaLinux x86-64-v2 rebuild (needs only SSE4.2) from AlmaLinux's official
+  # altarch 10 base. amd64-only; opt-in via the moving `alma-v2` tag and versioned
+  # `-alma-v2` tags. This replaces the old `-x86-64-v2` suffix tags.
+  build-alma-v2:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -96,10 +169,10 @@ jobs:
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}}-x86-64-v2
-            type=semver,pattern={{major}}.{{minor}}-x86-64-v2
-            type=semver,pattern={{major}}-x86-64-v2
-            type=raw,value=latest-x86-64-v2,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=semver,pattern={{version}}-alma-v2
+            type=semver,pattern={{major}}.{{minor}}-alma-v2
+            type=semver,pattern={{major}}-alma-v2
+            type=raw,value=alma-v2,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
       - id: build
         uses: docker/build-push-action@v6
         with:
@@ -115,8 +188,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=v2
-          cache-to: type=gha,mode=max,scope=v2
+          cache-from: type=gha,scope=alma-v2
+          cache-to: type=gha,mode=max,scope=alma-v2
           provenance: true
           sbom: true
       - name: Assert x86-64-v2 runtime packages
@@ -130,7 +203,7 @@ jobs:
              python3 -c 'import cryptography' && command -v saslpasswd2"
 
   dockerhub-description:
-    needs: [build, build-v2]
+    needs: [build-ubuntu, build-alma-v3, build-alma-v2]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

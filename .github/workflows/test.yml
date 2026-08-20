@@ -9,6 +9,18 @@ on:
 jobs:
   container:
     runs-on: ubuntu-latest
+    # Both base images are gated on every change. The runner is native amd64, so
+    # this is where the Ubuntu image gets real x86-64 validation (local arm64
+    # Macs can only emulate amd64, under which the Rust cryptography extension
+    # segfaults). fail-fast: false so one variant's failure still reports the other.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: ubuntu
+            file: build/postfix-m365-relay/Dockerfile.ubuntu
+          - variant: alma
+            file: build/postfix-m365-relay/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
@@ -23,16 +35,16 @@ jobs:
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - name: Build release image
+      - name: Build release image (${{ matrix.variant }})
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: build/postfix-m365-relay/Dockerfile
+          file: ${{ matrix.file }}
           platforms: linux/amd64
           load: true
           tags: postfix-m365-relay:test
-          cache-from: type=gha,scope=tests
-          cache-to: type=gha,mode=max,scope=tests
+          cache-from: type=gha,scope=tests-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=tests-${{ matrix.variant }}
           provenance: false
 
       # These suites use only example.invalid identities and --network none for

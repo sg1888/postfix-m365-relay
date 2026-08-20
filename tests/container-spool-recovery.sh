@@ -73,8 +73,24 @@ start_relay() {
     [[ $(docker inspect -f '{{.State.Running}}' "$relay") == true ]] || {
       docker logs "$relay"; return 1;
     }
-    docker exec "$relay" bash -c 'exec 3<>/dev/tcp/127.0.0.1/2525' \
-      >/dev/null 2>&1 && return 0
+    if docker exec "$relay" bash -c 'exec 3<>/dev/tcp/127.0.0.1/2525' \
+      >/dev/null 2>&1; then
+      # A valid mounted token makes this an entirely offline ordering proof.
+      # Postfix must not activate before the bounded startup token check. This
+      # catches the live race that once let a recovered queue attempt XOAUTH2
+      # with an empty token file during the first milliseconds of boot.
+      docker logs "$relay" > "$fixture/startup.log" 2>&1
+      token_line=$(grep -n -m1 'startup token check completed before Postfix activation' \
+        "$fixture/startup.log" | cut -d: -f1)
+      postfix_line=$(grep -n -m1 'relay-supervisor: started postfix' \
+        "$fixture/startup.log" | cut -d: -f1)
+      [[ -n $token_line && -n $postfix_line && $token_line -lt $postfix_line ]] || {
+        cat "$fixture/startup.log" >&2
+        echo 'Postfix activated before the startup token gate completed' >&2
+        return 1
+      }
+      return 0
+    fi
     sleep 1
   done
   docker logs "$relay"

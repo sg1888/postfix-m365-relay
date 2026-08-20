@@ -169,6 +169,12 @@ MAIL_SMTPD_USERS_FILE=/run/secrets/smtpd_users
 With password policies, AUTH is absent before STARTTLS and offered afterward as
 PLAIN/LOGIN. See `EXTERNAL-SENDERS.md` for every policy truth table.
 
+There is no SASL-without-TLS fallback. A plaintext-only legacy device must use
+IP admission with no credentials (`ip`, or the allowlisted branch of
+`ip-or-auth`) on a firewall-restricted trusted network. Do not use `smtp-auth`
+or `ip-and-auth` for such a device. Put a TLS-capable SMTP gateway beside a
+legacy device that cannot remain on a trusted local segment.
+
 ## Certbot-managed inbound STARTTLS
 
 Use Certbot's `fullchain.pem` (leaf plus intermediates) and `privkey.pem`:

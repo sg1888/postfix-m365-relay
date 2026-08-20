@@ -54,6 +54,10 @@ LOGIN = "https://login.microsoftonline.com"
 OUTLOOK_SCOPE = "https://outlook.office365.com/.default"
 
 
+class TokenFileError(RuntimeError):
+    """A concise, already-redacted failure while replacing the token file."""
+
+
 def b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
@@ -141,27 +145,48 @@ def write_token_file(path: Path, token: str, expires_in: int, group: int | None 
         "refresh_token": "unused-app-only-flow-see-docs-18",
     }
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+    # Include the PID in the staging name. The supervisor normally runs only
+    # one minter, but an administrator may invoke a diagnostic concurrently;
+    # sharing `relay.tmp` would let one process replace or delete the other's
+    # staging file. Both names remain in the destination directory so rename is
+    # atomic on every supported filesystem.
+    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
         with os.fdopen(handle, "w") as stream:
             json.dump(payload, stream)
             stream.flush()
             os.fsync(stream.fileno())
+        # Postfix runs as its own account inside the container and has to read
+        # this file. Applying ownership before rename ensures there is never a
+        # live 0600 root:root token, even for a fraction of a second. A previous
+        # host-timer implementation changed ownership after the helper exited;
+        # manual runs consequently produced a generic SASL failure.
+        if group is not None:
+            os.chown(temporary, -1, group)
+            os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)
+        os.replace(temporary, path)
+    except OSError as error:
+        # Expected storage failures are operator problems, not Python debugging
+        # events. Remove only our staging file, preserve any existing good live
+        # token, and report the exact destination plus the OS reason without a
+        # traceback (or, importantly, any token bytes).
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        reason = error.strerror or str(error)
+        raise TokenFileError(f"could not atomically replace token file {path}: {reason}") from None
     except BaseException:
+        # Keep the same no-partial-file invariant for an unexpected exception,
+        # while retaining its traceback because that path represents a code bug.
         temporary.unlink(missing_ok=True)
         raise
-    # Postfix runs as its own account inside the container and has to read this.
-    # Applying the ownership here rather than in the systemd unit matters: when
-    # it lived in ExecStartPost, running this script by hand left the file
-    # 0600 root:root and the relay could not authenticate until the next timer
-    # run. The plugin reports that as "generic failure", which says nothing
-    # about permissions and sends you looking in the wrong place.
-    if group is not None:
-        os.chown(temporary, -1, group)
-        os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)
-    os.replace(temporary, path)
     return expiry
 
 
@@ -260,12 +285,9 @@ def main() -> int:
     token, expires_in = request_token(env["MAIL_RELAY_TENANT"], env["MAIL_RELAY_CLIENT_ID"], assertion)
     try:
         expiry = write_token_file(token_file, token, expires_in, group)
-    except PermissionError:
-        # Running unprivileged, in a test, or against a path someone else owns.
-        # Better to write a usable token than to fail outright.
-        print("warning: could not set group ownership; Postfix may not be able to read the token",
-              file=sys.stderr)
-        expiry = write_token_file(token_file, token, expires_in)
+    except TokenFileError as error:
+        print(f"Token file update failed: {error}", file=sys.stderr)
+        return 1
 
     if not args.quiet:
         print(f"wrote {token_file} (valid {expires_in}s, until {time.strftime('%H:%M:%S', time.localtime(expiry))})")

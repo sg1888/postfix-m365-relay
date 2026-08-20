@@ -48,6 +48,16 @@ jobs:
       # normal happy-path protocol test cannot prove.
       - name: Persistent spool replacement and recovery
         run: ./tests/container-spool-recovery.sh postfix-m365-relay:test
+      - name: Durable alert incidents and independent channels
+        run: ./tests/container-alert-incidents.sh postfix-m365-relay:test
+      - name: Automatic alert trigger matrix
+        run: ./tests/container-alert-trigger-matrix.sh postfix-m365-relay:test
+      - name: OAuth rotation alert
+        run: ./tests/container-oauth-rotation-alert.sh postfix-m365-relay:test
+      - name: Managed inbound TLS rotation alert
+        run: ./tests/container-inbound-tls-rotation-alert.sh postfix-m365-relay:test
+      - name: Invalid passthrough alias alert
+        run: ./tests/container-invalid-alias-alert.sh postfix-m365-relay:test
       - name: Outbound STARTTLS certificate matrix
         run: ./tests/container-upstream-tls.sh postfix-m365-relay:test
       - name: Configuration matrix

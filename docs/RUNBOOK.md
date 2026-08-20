@@ -9,6 +9,12 @@
 - Do not mark a behavior verified unless you watched it work.
 - Never expose the published-device posture to the Internet.
 
+Tenant authorization uses a dedicated shared mailbox and claims-less,
+group-scoped `Application SMTP.SendAsApp`. The app must have no API permissions,
+no `FullAccess`, and no mail-reading role. Follow
+[MICROSOFT-SETUP.md](MICROSOFT-SETUP.md); do not reconstruct the older
+licensed-user/FullAccess workflow from historical outage notes.
+
 ## Normal state
 
 The container is running; `postfix` plus token, rotation, verify, and log-tail
@@ -58,20 +64,65 @@ certificates; neither path can touch the other's key directory.
 Verification runs hourly. With `MAIL_ADMIN_EMAIL`, it submits an end-to-end probe
 through loopback; otherwise it performs local checks only.
 
+## Alerts and durable incidents
+
+Operational failures are incidents, not repeated free-form emails. The first
+failed observation creates an `open` notification with a stable `PMR-*`
+reference. Later observations update the durable occurrence count but do not
+send duplicate pages. The first healthy check emits one `recovered`
+notification with the same reference and total duration. Incident and pending
+delivery records live under `/var/lib/mail-relay/alerts` in the persistent state
+volume, so replacing the container does not forget an outage.
+
+Every email and webhook includes UTC and configured-`TZ` timestamps, relay
+identity, first/current observation, duration, non-secret evidence, likely
+causes, suggested actions, and this runbook link. Microsoft error codes,
+timestamps, Trace IDs, and Correlation IDs are useful evidence. Assertions,
+tokens, passwords, private keys, and credential-shaped values are redacted.
+
+Email and `MAIL_ALERT_WEBHOOK` are attempted independently. An email-listener
+failure cannot prevent the webhook, and a webhook failure cannot prevent local
+queue submission. Only failed channels remain in the durable outbox. A later
+health/rotation pass retries them after persisted exponential delays of 30, 60,
+120 seconds, up to one hour. Local audit lines are always written.
+
+| Condition | Opens | Clears when |
+|---|---|---|
+| token refresh | configured consecutive-failure threshold (default 3) | token check succeeds |
+| SMTP listener, token, OAuth cert, or rotation audit | verifier hard failure | that category passes |
+| OAuth or managed inbound-TLS rotation | loop operation fails | later loop operation succeeds |
+| BYO inbound TLS | certificate enters renewal window | replacement is outside the window |
+| CA bundle age | exceeds `MAIL_CA_BUNDLE_MAX_AGE_DAYS` | current image is within policy |
+| deferred queue | exceeds `MAIL_QUEUE_WARN_DEPTH` | returns to/below threshold |
+| inbound SASL failures | exceeds `MAIL_SASL_FAILURE_WARN_COUNT` | returns to/below threshold |
+| passthrough alias | proof is refused or not observed sent | all enabled alias probes send |
+| push monitor | configured endpoint fails | all configured endpoints respond |
+
+Inspect state without printing message bodies or secrets:
+
+```bash
+docker exec postfix-m365-relay find /var/lib/mail-relay/alerts -type f -maxdepth 2 -printf '%P\n'
+docker logs --since 1h postfix-m365-relay | grep 'alert-event:'
+```
+
+An `incidents/<event>.json` file means the condition remains open. An `outbox`
+file means at least one configured notification channel has not acknowledged
+delivery. Do not delete these to silence an alert; correct the condition or
+deliberately remove the affected channel configuration and document that
+decision.
+
 ## Certificate operations
 
 List app-registration credentials read-only:
 
 ```bash
-docker exec postfix-m365-relay \
-  /usr/local/libexec/mail-relay/rotate-smtp-relay-cert.py --list-keys
+docker exec postfix-m365-relay relay-admin keys
 ```
 
 Force rotation only with test objects and an observed proof recipient:
 
 ```bash
-docker exec postfix-m365-relay \
-  /usr/local/libexec/mail-relay/rotate-smtp-relay-cert.py --force
+docker exec postfix-m365-relay relay-admin rotate --force
 ```
 
 Before and after, hash the inbound TLS certificate. It must be byte-identical.
@@ -94,6 +145,17 @@ Missing/expired token with AADSTS certificate errors usually means the public
 certificate is absent, expired, or not propagated. A token for Graph instead of
 `outlook.office365.com/.default` is refused at SMTP AUTH. Do not delete queued
 mail while diagnosing.
+
+Send a one-time channel test from a healthy isolated instance:
+
+```bash
+docker exec postfix-m365-relay \
+  /usr/local/libexec/mail-relay/alert.sh notify info manual-test \
+  'Operator-requested notification channel test'
+```
+
+Confirm the exact email and webhook receipt. This command does not open an
+incident and therefore does not produce a later recovery message.
 
 ## Supervisor failure drills
 

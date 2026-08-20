@@ -18,6 +18,18 @@ The managed Postfix block always controls relay restrictions, sender checking,
 OAuth authentication, TLS-before-AUTH, and local-delivery refusal. `POSTFIX_*`
 is for tuning the remaining surface, not bypassing those boundaries.
 
+## Microsoft authorization boundary
+
+The recommended deployment uses a dedicated shared mailbox and claims-less
+Exchange App RBAC. The app registration has no API permissions, no `FullAccess`,
+and no mail-reading role. Exchange grants only `Application SMTP.SendAsApp`
+inside a group-backed mailbox scope. The app can submit as an in-scope mailbox;
+it cannot read messages or submit as an out-of-scope mailbox. Keep the shared
+mailbox dedicated to relay output and block interactive sign-in.
+
+See [MICROSOFT-SETUP.md](MICROSOFT-SETUP.md) for Microsoft's source documents,
+licensing caveats, exact PowerShell workflow, and positive/negative proof.
+
 ## Platforms
 
 | Platform | Status |

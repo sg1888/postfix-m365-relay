@@ -79,6 +79,26 @@ The old printer at `.50` may submit without TLS by IP. A device elsewhere must
 issue STARTTLS before Postfix advertises AUTH. Content from the old printer is
 plaintext on the LAN; the Microsoft hop is still encrypted.
 
+### Why there is no plaintext SASL compatibility mode
+
+Some older printers have no usable TLS or SSL support. Do not assign those
+devices a relay username and password: SASL PLAIN/LOGIN without TLS exposes the
+credentials to anyone who can observe the network. This image therefore never
+advertises AUTH before STARTTLS and rejects an early AUTH attempt.
+
+For a fixed legacy device, use `ip` or the allowlisted side of `ip-or-auth`,
+leave authentication disabled on the device, and restrict its source address
+both in `MAIL_TRUSTED_NETWORKS` and at the firewall. Prefer a dedicated printer
+VLAN and a `/32` entry per device. If the device must cross an untrusted
+network, run a TLS-capable SMTP gateway on its local segment rather than
+carrying a reusable password in plaintext.
+
+This distinction is important in mixed mode: `MAIL_INBOUND_TLS=may` permits the
+allowlisted printer's unauthenticated SMTP session to remain plaintext, but it
+does **not** permit plaintext authentication. A password-authenticated client
+still has to complete STARTTLS first. `smtp-auth` and `ip-and-auth` consequently
+do not work for clients that lack STARTTLS.
+
 ### Defense in depth
 
 ```yaml

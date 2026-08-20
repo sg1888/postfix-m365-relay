@@ -338,6 +338,32 @@ def read_env(env_file: Path) -> dict[str, str]:
     return env
 
 
+def pending_addition_is_live(pending: dict, current_cert) -> bool:
+    """Return whether crash-recovery state identifies the local live cert."""
+    from cryptography.hazmat.primitives import hashes
+
+    return pending.get("thumbprint") == current_cert.fingerprint(hashes.SHA1()).hex().upper()
+
+
+def run_immediate_token_refresh(
+    refresh_script: Path, env_file: Path, env: dict[str, str]
+) -> bool:
+    """Re-mint with the newly swapped pair and preserve file-loaded config.
+
+    A child process cannot inherit variables held only in this Python mapping.
+    Supplying them through ``env`` mirrors the entrypoint's exported process
+    environment without exposing identifiers or file paths in the process
+    command line. Secret bytes never enter this mapping; only key/cert paths do.
+    """
+    refresh_environment = os.environ.copy()
+    refresh_environment.update(env)
+    return subprocess.run(
+        [str(refresh_script), "--quiet", "--env-file", str(env_file)],
+        check=False,
+        env=refresh_environment,
+    ).returncode == 0
+
+
 def main() -> int:
     project = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -433,7 +459,14 @@ def main() -> int:
         the answer. Anything else would report a false failure and leave a human
         hunting for a key that is not there.
         """
-        graph_token = rotation.token(f"{GRAPH}/.default", current_key, current_cert)
+        try:
+            graph_token = rotation.token(f"{GRAPH}/.default", current_key, current_cert)
+        except Exception as error:  # noqa: BLE001 - retry is persisted by caller
+            # Graph and Outlook token audiences were observed accepting a newly
+            # rotated certificate at different times. Treat that as a retryable
+            # operation result, not an uncaught traceback that loses the key ID
+            # the next invocation still needs to clean up.
+            return False, f"Graph token unavailable: {type(error).__name__}: {error}"
         status, result = rotation.graph(
             "POST",
             f"{app_path}/removeKey",
@@ -522,6 +555,47 @@ def main() -> int:
     # ran immediately after a swap there would be no way back from a rotation
     # that turned out to be broken.
     state = rotation.read_state()
+
+    # A key added for a rotation that never reached the local swap is not merely
+    # an inventory curiosity: repeated failures would consume credential slots
+    # and make it unclear which key is safe to remove. Record the exact key ID
+    # immediately after addKey, and retry cleanup on every later invocation.
+    #
+    # There is one unavoidable cross-system crash window: the local pair can be
+    # swapped just before state is updated. Comparing the recorded thumbprint to
+    # the certificate currently on disk closes that window. A matching record
+    # was adopted successfully and must never be removed; a nonmatching record
+    # is an abandoned staged credential and is safe to remove by exact ID.
+    pending_addition = state.get("pending_addition")
+    if pending_addition and not args.dry_run:
+        if pending_addition_is_live(pending_addition, current_cert):
+            rotation.log(
+                "cleanup-added-key",
+                "ok",
+                f"{pending_addition.get('key_id')} is the live local certificate; marked adopted",
+            )
+            state.pop("pending_addition", None)
+            rotation.write_state(state)
+        else:
+            removed, note = remove_key(pending_addition["key_id"])
+            if removed:
+                rotation.log(
+                    "cleanup-added-key",
+                    "ok",
+                    f"removed abandoned key {pending_addition['key_id']}: {note}",
+                )
+                state.pop("pending_addition", None)
+                rotation.write_state(state)
+            else:
+                rotation.log(
+                    "cleanup-added-key",
+                    "FAILED",
+                    f"{pending_addition['key_id']} remains pending: {note}",
+                )
+                # Do not add another credential while the exact previous one is
+                # still unresolved. This turns eventual consistency into a
+                # bounded retry queue instead of an accumulating orphan set.
+                return 1
     pending = state.get("pending_removal")
     if pending and not args.dry_run:
         age_days = (time.time() - pending.get("rotated_at", 0)) / 86400
@@ -610,6 +684,42 @@ def main() -> int:
     added_key_id = result["keyId"]
     rotation.log("add-key", "ok", f"keyId {added_key_id}")
 
+    # Persist before the first eventual-consistency read. The original
+    # implementation attempted removal for only 60 seconds on failure and then
+    # forgot the ID; live Graph behavior left that accepted removal visible and
+    # required a later exact-ID retry. This record survives a crash, restart, or
+    # stale read and is cleared only after confirmed removal or local adoption.
+    state["pending_addition"] = {
+        "key_id": added_key_id,
+        "thumbprint": new_thumbprint,
+        "added_at": int(time.time()),
+    }
+    rotation.write_state(state)
+
+    def abandon(step: str, detail: str) -> int:
+        """Leave the old pair live and durably retire the unused added key.
+
+        Cleanup is attempted immediately for fast recovery. If Graph remains
+        stale or unavailable, pending_addition is intentionally retained; the
+        next normal loop retries the same exact key before adding anything else.
+        """
+        rotation.log(step, "FAILED", detail)
+        removed, note = remove_key(added_key_id)
+        if removed:
+            rotation.log("abandon", "ok", f"removed the unused key {added_key_id}: {note}")
+            state.pop("pending_addition", None)
+            rotation.write_state(state)
+        else:
+            rotation.log(
+                "abandon",
+                "FAILED",
+                f"could not yet remove {added_key_id}: {note}; cleanup is recorded for retry",
+            )
+        staging_key.unlink(missing_ok=True)
+        staging_cert.unlink(missing_ok=True)
+        rotation.log(step, "note", "old certificate is still live and unchanged")
+        return 1
+
     # --- 4. wait for the directory to catch up -------------------------------
     #
     # Graph directory writes are eventually consistent. During qualification, a
@@ -624,32 +734,7 @@ def main() -> int:
             rotation.log("await-replication", "ok", f"visible after {attempt * 5}s")
             break
     else:
-        rotation.log("await-replication", "FAILED", f"{added_key_id} not visible after 120s")
-        staging_key.unlink(missing_ok=True)
-        staging_cert.unlink(missing_ok=True)
-        rotation.log("await-replication", "note",
-                     f"the key may still appear later; remove {added_key_id} by hand if it does")
-        return 1
-
-
-    def abandon(step: str, detail: str) -> int:
-        """Give up cleanly: no swap, no orphan key, no staging files left behind.
-
-        The certificate that is live keeps working -- nothing has been changed
-        yet -- but the key added at step 3 has to come off the app registration,
-        or every failed attempt leaves another one there.
-        """
-        rotation.log(step, "FAILED", detail)
-        removed, note = remove_key(added_key_id)
-        if removed:
-            rotation.log("abandon", "ok", f"removed the unused key {added_key_id}: {note}")
-        else:
-            rotation.log("abandon", "FAILED",
-                         f"could not remove {added_key_id}: {note}; remove it by hand")
-        staging_key.unlink(missing_ok=True)
-        staging_cert.unlink(missing_ok=True)
-        rotation.log(step, "note", "old certificate is still live and unchanged")
-        return 1
+        return abandon("await-replication", f"{added_key_id} not visible after 120s")
 
     # --- 5. prove the new certificate before trusting it ---------------------
     #
@@ -692,6 +777,11 @@ def main() -> int:
     os.replace(staging_cert, rotation.cert_path)
     rotation.log("swap", "ok", f"thumbprint now {new_thumbprint}; previous kept alongside")
 
+    # If the process dies before this write, next invocation recognizes the
+    # pending addition's thumbprint as the local live certificate and clears it
+    # without removal. Clearing immediately here keeps the normal state simple.
+    state.pop("pending_addition", None)
+
     # --- 7. schedule the old key's removal for a later run -------------------
     old_thumbprint = current_cert.fingerprint(hashes.SHA1()).hex().upper()
     status, app = rotation.graph("GET", app_path, graph_token)
@@ -718,23 +808,29 @@ def main() -> int:
             "thumbprint": old_thumbprint,
             "rotated_at": int(time.time()),
         }
-        rotation.write_state(state)
         rotation.log("schedule-retire", "ok", f"{old_key_id} retires in {args.grace_days} days")
     else:
         rotation.log("schedule-retire", "note",
                      f"no key on the app registration matches the replaced certificate "
                      f"{old_thumbprint}; nothing scheduled for retirement. If that "
                      f"certificate is still registered, remove it with --remove-key")
+    rotation.write_state(state)
 
     refresh_script = Path(__file__).with_name("refresh-smtp-token.py")
-    refreshed = subprocess.run([str(refresh_script), "--quiet"], check=False).returncode == 0
+    # `--env-file` populated this process's local dictionary; subprocesses do
+    # not inherit Python variables. The first live forced rotation swapped the
+    # certificate and then failed with "MAIL_RELAY_TENANT is not set" here.
+    # Pass the validated non-secret configuration in the child environment and
+    # retain the env-file fallback for off-host diagnostics. No secret value is
+    # placed in argv (the private key is referenced only by its file path).
+    refreshed = run_immediate_token_refresh(refresh_script, env_file, env)
     if not refreshed:
         rotation.log("refresh-token", "FAILED", "certificate swapped but immediate token mint failed")
         return 1
     rotation.log("rotate", "ok", "new certificate is live and the token was re-minted")
     alert = Path(__file__).with_name("alert.sh")
     if alert.is_file():
-        subprocess.run([str(alert), "info", "certificate-rotation",
+        subprocess.run([str(alert), "notify", "info", "certificate-rotation",
                         f"Certificate rotation succeeded; new thumbprint {new_thumbprint}"], check=False)
     return 0
 

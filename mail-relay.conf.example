@@ -5,6 +5,9 @@
 #### Required: three Microsoft identifiers and at least one sender.
 MAIL_RELAY_TENANT=
 MAIL_RELAY_CLIENT_ID=
+# Recommended: a dedicated shared mailbox used only for relay output. Claims-less
+# Exchange App RBAC needs no API permission, FullAccess, or separate mailbox
+# license within Microsoft's shared-mailbox limits. See docs/MICROSOFT-SETUP.md.
 MAIL_SEND_MAILBOX=
 MAIL_SENDER_APP=
 MAIL_SENDER_NAME_APP=Example application
@@ -87,8 +90,12 @@ MAIL_INBOUND_TLS_RENEW_AT_DAYS=365
 # For a CA-issued certificate, CERT should be a fullchain PEM: leaf first,
 # followed by intermediate issuers. Certbot's fullchain.pem is ready to use.
 
-#### Optional alert channels. Webhook bodies contain no credentials.
+#### Optional independent JSON incident channel. Configure this as well as the
+#### admin email when possible: an OAuth/mail outage can prevent email alerts.
+#### Bodies contain redacted evidence, UTC/local timestamps, a stable reference,
+#### duration, causes, actions, and the runbook link; never credentials.
 MAIL_ALERT_WEBHOOK=
+# MAIL_RUNBOOK_URL=https://github.com/sg1888/postfix-m365-relay/blob/main/docs/RUNBOOK.md
 MAIL_RELAY_PUSH_BASE=
 
 #### Any POSTFIX_name becomes `name = value`, except security-sensitive settings

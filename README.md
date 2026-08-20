@@ -28,6 +28,24 @@ for DKIM, SPF, DMARC, reputation, and final delivery.
 
 Start with the local posture unless a non-Docker device truly needs access.
 
+## Documentation index
+
+| Topic | Start here |
+|---|---|
+| First installation and minimal configuration | [First installation](#first-installation) |
+| Microsoft shared mailbox, claims-less App RBAC, and licensing | [Microsoft 365 setup](docs/MICROSOFT-SETUP.md) |
+| Sender allowlists, address rewriting, fixed names, domains, and aliases | [Sender rewriting scenarios](docs/SENDER-REWRITING.md) |
+| Connecting Grafana, Gitea, Alertmanager, and Authelia | [Application wiring](docs/WIRING.md) |
+| Docker networks, cross-project access, LAN publication, and firewalls | [Networking](docs/NETWORKING.md) |
+| Legacy printers, IP admission, SASL, and TLS-before-AUTH | [External senders](docs/EXTERNAL-SENDERS.md) |
+| OAuth keys, device passwords, inbound TLS keys, and corporate inspection CA | [Secrets](docs/SECRETS.md) |
+| Every environment variable and Postfix override | [Configuration reference](docs/CONFIGURATION.md) |
+| Token refresh, certificate rotation, queues, alerts, and recovery | [Operator runbook](docs/RUNBOOK.md) |
+| Security boundary and supported CPU platforms | [Scope and platforms](docs/SCOPE.md) |
+| Offline, live-install, failure, and release qualification | [Testing](docs/TESTING.md) |
+| Existing-install migration | [Migration](docs/MIGRATION.md) |
+| Publishing images and release tags | [Maintainer release procedure](docs/RELEASING.md) |
+
 ## First installation
 
 The container configuration is deliberately small. Create its persistent host
@@ -98,23 +116,28 @@ Use a separate test mailbox and test app registration first. Never experiment
 against a production relay or mailbox. If any Exchange permission changes, wait
 two hours before interpreting a send test.
 
-1. Create a licensed regular user mailbox. A shared mailbox is not supported for
-   this flow.
+1. Create a dedicated shared mailbox and block its interactive sign-in. Keep it
+   only for relay output, not ordinary email. It normally needs no separate
+   license below 50 GB; licensed archive, hold, advanced compliance, or larger
+   storage scenarios have separate Microsoft requirements.
 2. In the Microsoft Entra admin center, open **Entra ID**, select **App
    registrations**, and create an app registration.
 3. Record its Application (client) ID and tenant ID. Under **Enterprise
    applications**, open the corresponding application and separately record the
    Enterprise Application Object ID.
-4. Under the app registration's **API permissions**, choose **Add a permission**,
-   then **APIs my organization uses**, **Office 365 Exchange Online**,
-   **Application permissions**, and `SMTP.SendAsApp`. Grant admin consent.
-5. Run `powershell/setup-exchange.ps1` from an administrator workstation. It
-   creates Exchange's service-principal record, grants mailbox `FullAccess`, and
-   can optionally enable org-wide alias sending.
-6. Start the container once and copy the public certificate from its log. Upload
+4. Leave the app registration's **API permissions empty**. Claims-less Exchange
+   App RBAC does not use the legacy Entra `SMTP.SendAsApp` permission and needs
+   no Graph mail permissions.
+5. Create a dedicated Exchange distribution or mail-enabled security group and
+   add only the relay shared mailbox as a direct member.
+6. Run `powershell/setup-exchange.ps1` from an administrator workstation. It
+   creates Exchange's service-principal record, a group-backed management scope,
+   and the scoped `Application SMTP.SendAsApp` role. It does not grant
+   `FullAccess`, so the relay app has no permission to read mailbox contents.
+7. Start the container once and copy the public certificate from its log. Upload
    it under **App registrations → your app → Certificates & secrets →
    Certificates**. Never upload or copy the private key.
-7. Wait two hours after the last permission change, then prove delivery using
+8. Wait two hours after the last permission change, then prove delivery using
    only the test objects.
 
 Example PowerShell invocation:
@@ -122,12 +145,18 @@ Example PowerShell invocation:
 ```powershell
 ./powershell/setup-exchange.ps1 `
   -Mailbox relay-test@example.com `
+  -ScopeGroup postfix-m365-relay-mailboxes@example.com `
   -ClientId 11111111-1111-1111-1111-111111111111 `
   -EnterpriseAppObjectId 22222222-2222-2222-2222-222222222222
 ```
 
 Pass `-EnableSendFromAlias` only after reading the passthrough warning below.
 That switch changes `SendFromAliasEnabled` for the entire Exchange organization.
+
+Read [the complete Microsoft 365 shared-mailbox and App RBAC setup](docs/MICROSOFT-SETUP.md)
+before making tenant changes. It links the Microsoft documentation behind each
+PowerShell command, explains the no-read security boundary and licensing
+caveats, and includes positive plus out-of-scope negative tests.
 
 ## Wire an application
 
@@ -179,6 +208,15 @@ Available policies are `off`, `ip`, `smtp-auth`, `ip-or-auth`, and
 as PLAIN/LOGIN. AlmaLinux 10 requires TLS 1.2 or newer; keep ancient plaintext
 devices in an IP-only policy rather than weakening crypto policy.
 
+**A client that cannot use STARTTLS must not be given a SASL password.** Use
+`ip` for a fleet of fixed legacy devices, or `ip-or-auth` when the same relay
+must also serve modern authenticated clients. In `ip-or-auth`, an allowlisted
+legacy device submits without credentials while every non-allowlisted client
+must negotiate STARTTLS before AUTH is available. Restrict the published port
+and allowlisted addresses at the firewall because the legacy device-to-relay
+hop is neither authenticated nor encrypted. If the device is not on a trusted
+local network, place a TLS-capable SMTP gateway near it instead.
+
 Read [EXTERNAL-SENDERS.md](docs/EXTERNAL-SENDERS.md) before publishing a port.
 
 ## Corporate TLS inspection
@@ -216,6 +254,8 @@ contract. Pin a release digest after evaluating it; tags are mutable.
 ## Next documents
 
 - [GitHub repository and Actions guide](docs/GITHUB.md)
+- [Microsoft 365 shared-mailbox and App RBAC setup](docs/MICROSOFT-SETUP.md)
+- [Sender address and display-name rewriting scenarios](docs/SENDER-REWRITING.md)
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Docker and LAN networking](docs/NETWORKING.md)
 - [Secrets model](docs/SECRETS.md)

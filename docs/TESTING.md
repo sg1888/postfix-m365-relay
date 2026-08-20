@@ -103,7 +103,8 @@ An empty error list is the expected result for each file.
 This phase changes external state and requires explicit approval immediately
 before execution.
 
-1. Create or identify the dedicated licensed test mailbox and test app.
+1. Create or identify a dedicated test shared mailbox and test app. Keep API
+   permissions empty; use scoped Exchange `Application SMTP.SendAsApp`.
 2. Record tenant ID, application/client ID, and enterprise-application object ID.
 3. Grant only the documented Exchange application permission and mailbox access.
 4. Upload only the public certificate printed by first boot.
@@ -185,7 +186,8 @@ the documented security difference is observable rather than assumed.
 
 On the healthy test instance:
 
-1. Run `alert.sh` directly and confirm the email arrives.
+1. Run `alert.sh notify info manual-test 'test detail'` directly and confirm the
+   email arrives.
 2. Point the optional webhook at a controlled test receiver; verify valid JSON,
    special-character escaping, success status, and receiver-unreachable handling.
 3. Use a disposable instance with an intentionally wrong test tenant/client ID,
@@ -197,6 +199,15 @@ On the healthy test instance:
    recovery.
 7. Create queue depth and SASL-failure warning conditions and confirm they are
    reported without exposing credentials.
+
+For every automatic trigger, require all of the following rather than merely a
+zero exit code: exact email body, exact webhook JSON, one stable reference,
+duplicate suppression on a second failed observation, recovery with that same
+reference and elapsed duration, persistence across container replacement,
+configured-local plus UTC timestamps, and no token/assertion/password/key data.
+Break the email listener while the webhook is healthy, then reverse the failure;
+each channel must be attempted independently and only its own failed delivery
+may remain queued for bounded retry.
 
 Email alerts cannot leave through a deliberately broken OAuth path; the webhook
 is the independent channel for that failure. Test both channels separately.

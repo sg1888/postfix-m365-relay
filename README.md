@@ -88,6 +88,30 @@ it you'll need:
 * Admin access to a Microsoft 365 **tenant** (not a consumer M365 account)
 * PowerShell, Docker, and a reasonable amount of IT comfort
 
+### Setup at a glance
+
+Start to finish, getting mail flowing is these steps. Each links to its detail
+below; do the Microsoft side and the Docker side in either order — they meet at
+step 6 (the certificate upload).
+
+1. **Microsoft:** create a dedicated shared mailbox and an Entra app registration;
+   record the tenant ID, client ID, and Enterprise App object ID.
+   → [One-time Microsoft setup](#one-time-microsoft-setup)
+2. **Microsoft:** run `powershell/setup-exchange.ps1` to grant the scoped,
+   read-nothing SendAs role. → [same section](#one-time-microsoft-setup)
+3. **Docker:** `docker compose up -d`. The relay writes a template config and
+   waits. → [Quick start](#quick-start-a-private-docker-relay)
+4. **Docker:** fill the three identifiers + mailbox into
+   `./mail-relay/mail-relay.conf`. Named senders are optional. The relay starts on
+   its own. → [Quick start](#quick-start-a-private-docker-relay)
+5. **Docker:** the relay generates its OAuth certificate and writes the public
+   half to `./mail-relay/microsoft365-app-public-cert.pem`.
+6. **Microsoft:** upload that file to the app registration's **Certificates**.
+   The relay accepts the token, deletes the export, and starts sending — and from
+   here it rotates the certificate itself, with no further manual steps.
+7. **Verify:** run the built-in end-to-end check and watch a real message land.
+   → [Test that it actually works](#test-that-it-actually-works)
+
 ---
 
 ## How it works in 30 seconds
@@ -182,10 +206,15 @@ required values. Edit that file on the host:
 MAIL_RELAY_TENANT=00000000-0000-0000-0000-000000000000
 MAIL_RELAY_CLIENT_ID=11111111-1111-1111-1111-111111111111
 MAIL_SEND_MAILBOX=relay-test@example.com
-MAIL_SENDER_APP=app@relay.example.local
-MAIL_SENDER_NAME_APP=Example application
 MAIL_ADMIN_EMAIL=relay-admin@example.com
 ```
+
+Those three identifiers plus the mailbox are **all that is required**. Named
+senders are optional: leave them out and every message is sent as
+`MAIL_SEND_MAILBOX` while keeping the display name the sending application
+supplied. Add a `MAIL_SENDER_<APP>` (and optional `MAIL_SENDER_NAME_<APP>`) only
+when you want to pin a specific From display name for one application. See
+[Sender modes](#sender-modes) for the sender allowlist.
 
 Save it in place — the waiting container notices and starts on its own. The file
 is a bind-mounted host file, not baked into the image; environment variables and
@@ -193,10 +222,15 @@ is a bind-mounted host file, not baked into the image; environment variables and
 environment value wins over the matching file line without rewriting the file.
 
 Once the required values are set, an empty state volume triggers generation of an
-RSA-4096 OAuth client certificate. The log prints its public PEM and SHA-1
-thumbprint — upload that public certificate to your app registration (see
-[Microsoft 365 setup](docs/MICROSOFT-SETUP.md)). The container stays up, retries
-minting a token every five minutes, and queues mail until the upload propagates.
+RSA-4096 OAuth client certificate. Its **public** half is written to
+`./mail-relay/microsoft365-app-public-cert.pem` (with the SHA-1 thumbprint in
+`./mail-relay/microsoft365-app-cert-thumbprint.txt`) — a normal file in your
+`mail-relay` folder, no `docker logs` needed. Upload that public certificate to
+your app registration (see [Microsoft 365 setup](docs/MICROSOFT-SETUP.md)). The
+container stays up, retries minting a token every five minutes, and queues mail
+until the upload propagates. Once Microsoft accepts it, the relay removes that
+export automatically and never needs you again — it rotates the certificate on
+its own from then on. The private key never leaves the `mail-relay-state` volume.
 
 > Prefer `docker run`? See the [full run command](docs/NETWORKING.md). No port is
 > published in either local-network path.
@@ -228,10 +262,10 @@ FAILED rotation:    last rotation event failed: ...
 
 The most common first-run result is a **token** failure: the container minted its
 OAuth certificate but you haven't uploaded the public half to your Microsoft app
-registration yet, so no token can be issued. Upload it (the startup log printed
-the PEM and thumbprint), wait for propagation, and re-run. The command exits `0`
-when healthy and `1` when any category failed, so you can drop it into a script
-or CI check.
+registration yet, so no token can be issued. Upload
+`./mail-relay/microsoft365-app-public-cert.pem`, wait for propagation, and re-run.
+The command exits `0` when healthy and `1` when any category failed, so you can
+drop it into a script or CI check.
 
 Just want to sanity-check configuration without sending a live email? Skip the
 probe:
@@ -492,9 +526,13 @@ Exchange, not the relay.
    Exchange's service-principal record, a group-backed management scope, and the
    scoped `Application SMTP.SendAsApp` role. It does **not** grant `FullAccess`,
    so the relay can't read mailbox contents.
-7. Start the container once and copy the public certificate from its log. Upload
-   it under **App registrations → your app → Certificates & secrets →
-   Certificates**. Never upload or copy the private key.
+7. Start the container once. It generates its OAuth certificate and writes the
+   **public** half to `./mail-relay/microsoft365-app-public-cert.pem`. Upload that
+   file under **App registrations → your app → Certificates & secrets →
+   Certificates**. Never upload or copy the private key (it never leaves the
+   relay's state volume). The relay removes the export once Microsoft accepts it,
+   then rotates the certificate itself — this upload is the only manual cert step,
+   ever.
 8. Wait two hours after the last permission change, then prove delivery using only
    the test objects.
 
@@ -515,6 +553,23 @@ changes. It links the Microsoft docs behind each PowerShell command and explains
 the no-read security boundary and licensing caveats.
 
 ## Sender modes
+
+**Named senders are optional.** With none configured, the relay sends every
+message as `MAIL_SEND_MAILBOX` and keeps the display name the sending application
+supplied (falling back to `MAIL_SENDER_NAME_FALLBACK` when the app supplies none).
+Define a `MAIL_SENDER_<APP>` — and optionally `MAIL_SENDER_NAME_<APP>` — only to
+pin a specific From display name for one application.
+
+Envelope-From admission is controlled by `MAIL_SENDER_ALLOWLIST`:
+
+| Value | Behavior |
+|-------|----------|
+| `off` (default) | Accept any envelope sender from an already-authorized client and collapse it to the mailbox. No per-application registration needed. |
+| `on` | Reject any envelope From that is not `MAIL_SEND_MAILBOX` or a configured `MAIL_SENDER_*` address. |
+
+`off` is **not** an open relay: who may connect is always governed separately by
+`MAIL_INBOUND_AUTH` and `MAIL_TRUSTED_NETWORKS`. The allowlist only restricts
+which From addresses an already-authorized client may use.
 
 `MAIL_SENDER_MODE=collapse` is the proven default. Every permitted sender is
 rewritten to the relay mailbox, which avoids Exchange `SendAsDenied` responses
@@ -583,7 +638,12 @@ Why each one earns its place:
 * **`mail-relay-state`** holds the OAuth **private key**. This is the one you do
   *not* skip. Lose it and the container mints a fresh certificate on the next
   update — which means re-uploading the public cert to Entra every single time.
-  Keep it, and setup is a one-time thing.
+  Keep it, and setup is a one-time thing. Note: `docker compose down` alone keeps
+  every volume; only `docker compose down -v` deletes the named volumes, wiping
+  the OAuth identity and any queued mail. If you do that, the relay detects the
+  empty state on next boot, generates a fresh certificate, and writes a new
+  `./mail-relay/microsoft365-app-public-cert.pem` for you to re-upload — a full
+  re-bootstrap. Your `./mail-relay` bind-mount folder is never touched by `-v`.
 * **`mail-relay-spool`** is the Postfix **queue**. When Microsoft has a bad five
   minutes, deferred mail waits here (12 hours by default). Make it ephemeral and a
   restart quietly eats whatever was queued.

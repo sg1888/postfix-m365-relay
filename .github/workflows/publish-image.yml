@@ -134,9 +134,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: peter-evans/dockerhub-description@v5
+      # Pinned to the audited v5 commit; a moved tag cannot slip in unreviewed
+      # code that would run with the Docker Hub credential.
+      - uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
+          # Editing the description needs a Read/Write/Delete PAT; a plain
+          # push/pull PAT returns Forbidden. DOCKERHUB_TOKEN must carry delete
+          # scope. The account password is deliberately not used here.
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
           readme-filepath: docs/DOCKERHUB.md

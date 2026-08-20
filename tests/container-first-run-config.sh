@@ -19,7 +19,7 @@ cleanup() {
 }
 trap cleanup EXIT
 cleanup
-install -d -m 0700 "$fixture/config"
+install -d -m 0700 "$fixture/config" "$fixture/config/secrets"
 
 start() {
   docker rm -f "$container" >/dev/null 2>&1 || true
@@ -46,13 +46,17 @@ fi
 # Overwrite the generated template as an administrator would edit it. The
 # display name contains command substitution syntax and dollar captures that
 # previously broke shell/regexp implementations. No marker may be created.
+printf '%s\n' 'config-printer:file-only-test-password' \
+  > "$fixture/config/secrets/smtpd_users"
+chmod 0600 "$fixture/config/secrets/smtpd_users"
 cat > "$fixture/config/mail-relay.conf" <<'EOF'
 MAIL_RELAY_TENANT=00000000-0000-0000-0000-000000000000
 MAIL_RELAY_CLIENT_ID=11111111-1111-1111-1111-111111111111
 MAIL_SEND_MAILBOX=file-mailbox@example.invalid
 MAIL_SENDER_APP=app@relay.example.local
 MAIL_SENDER_NAME_APP=$(touch /config/PWNED) $5 [Config Test]
-MAIL_INBOUND_AUTH=ip
+MAIL_INBOUND_AUTH=smtp-auth
+MAIL_INBOUND_TLS=may
 MAIL_VERIFY_SEND=no
 MAIL_TOKEN_ALERT_AFTER=99
 MAIL_TOKEN_LOOP_SECONDS=300
@@ -71,6 +75,12 @@ docker exec "$container" postfix status >/dev/null
 rendered=$(docker exec "$container" postmap -q 'From: app@relay.example.local' \
   regexp:/etc/postfix/header_checks)
 [[ $rendered == *'$(touch /config/PWNED) $5 [Config Test]'* ]]
+# `docker exec` starts with Docker's original environment, not the variables
+# PID 1 later loaded from this file. The documented relay-admin wrapper must
+# therefore parse the persistent file for every administrative command. Listing
+# users is a safe, network-free way to prove that file-only installations work.
+docker exec "$container" relay-admin users > "$fixture/relay-admin-users.log"
+grep -q 'config-printer@relay.example.local' "$fixture/relay-admin-users.log"
 echo 'ok first run generated a 0600 config, waited safely, and loaded literal special characters'
 
 # The host file survives forced replacement. An explicit Docker environment

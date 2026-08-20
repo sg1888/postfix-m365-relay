@@ -163,18 +163,21 @@ grep -q 'Verified TLS connection established to upstream' "$fixture/relay-secure
 echo 'ok outbound TLS verifies the trusted upstream identity under secure default'
 
 # alert.sh submits through the same queue and must also reach the sink.
-docker exec "$relay" /usr/local/libexec/mail-relay/alert.sh info qualification \
+docker exec "$relay" /usr/local/libexec/mail-relay/alert.sh notify info qualification \
   'Alert JSON/email characters: [test] $5 "quoted"' >/dev/null
 wait_for_messages 3
 wait_for_webhooks 1
 E2E_WEBHOOKS=$fixture/webhooks.jsonl python3 - <<'PY'
 import json, os
 records = [json.loads(line) for line in open(os.environ["E2E_WEBHOOKS"])]
-assert records[-1] == {
-    "severity": "info",
-    "event": "qualification",
-    "detail": 'Alert JSON/email characters: [test] $5 "quoted"',
-}
+notice = records[-1]
+assert notice["schema_version"] == 1
+assert notice["status"] == "notification"
+assert notice["severity"] == "info"
+assert notice["event"] == "qualification"
+assert notice["evidence"] == 'Alert JSON/email characters: [test] $5 "quoted"'
+assert notice["reference_id"].startswith("PMR-")
+assert notice["likely_causes"] and notice["remediation"]
 PY
 echo 'ok email and escaped-JSON webhook notifications delivered'
 
@@ -190,14 +193,56 @@ if docker exec -e MAIL_TOKEN_FILE=/run/secrets/intentionally-missing \
 fi
 wait_for_messages 4
 wait_for_webhooks 2
+# A second observation of the same fault updates durable occurrence state but
+# sends neither a second email nor a second webhook.
+if docker exec -e MAIL_TOKEN_FILE=/run/secrets/intentionally-missing \
+  -e MAIL_VERIFY_SEND=no "$relay" /usr/local/libexec/mail-relay/verify-relay.sh \
+  > "$fixture/expected-verify-duplicate.log" 2>&1; then
+  echo 'verifier accepted an intentionally missing token on duplicate pass' >&2
+  exit 1
+fi
+sleep 1
+[[ $(wc -l < "$fixture/messages.jsonl" | tr -d ' ') == 4 ]]
+[[ $(wc -l < "$fixture/webhooks.jsonl" | tr -d ' ') == 2 ]]
+
+# The documented wrapper reloads file configuration for this exec session. A
+# healthy token check clears the same incident and emits one correlated recovery.
+docker exec "$relay" relay-admin verify > "$fixture/verify-recovered.log" 2>&1
+wait_for_messages 5
+wait_for_webhooks 3
 E2E_WEBHOOKS=$fixture/webhooks.jsonl python3 - <<'PY'
 import json, os
 records = [json.loads(line) for line in open(os.environ["E2E_WEBHOOKS"])]
-assert records[-1]["severity"] == "error"
-assert records[-1]["event"] == "verification"
-assert "token file is absent" in records[-1]["detail"]
+opened, recovered = records[-2:]
+assert opened["severity"] == "error"
+assert opened["event"] == recovered["event"] == "token-health"
+assert opened["status"] == "open" and recovered["status"] == "recovered"
+assert opened["reference_id"] == recovered["reference_id"]
+assert opened["occurrence_count"] == 1
+assert recovered["occurrence_count"] == 2
+assert "token file is absent" in opened["evidence"]
+assert "token valid for" in recovered["evidence"]
 PY
-echo 'ok induced verifier failure fired both notification channels'
+E2E_MESSAGES=$fixture/messages.jsonl python3 - <<'PY'
+import base64, json, os
+from email import policy
+from email.parser import BytesParser
+records = [json.loads(line) for line in open(os.environ["E2E_MESSAGES"])]
+alerts = []
+for record in records:
+    message = BytesParser(policy=policy.default).parsebytes(base64.b64decode(record["message_b64"]))
+    if "token-health" in str(message["Subject"]):
+        alerts.append(message)
+assert len(alerts) == 2, [str(m["Subject"]) for m in alerts]
+assert " open:" in str(alerts[0]["Subject"])
+assert " recovered:" in str(alerts[1]["Subject"])
+opened_body, recovered_body = alerts[0].get_content(), alerts[1].get_content()
+for label in ("Reference:", "First observed (UTC):", "Observed (local):", "Duration:", "Likely causes", "Suggested actions", "Runbook"):
+    assert label in opened_body, label
+open_reference = next(line for line in opened_body.splitlines() if line.startswith("Reference:"))
+assert open_reference in recovered_body
+PY
+echo 'ok verifier incident delivered exact email/webhook schema, suppressed duplicate, and correlated recovery'
 
 # Passthrough remains an Entra must-test, but the local recurring probe can be
 # proven against the protocol sink: it must correlate its own queue ID to sent,

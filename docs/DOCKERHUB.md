@@ -2,6 +2,12 @@
 
 Self-contained Postfix submission relay for Microsoft 365 app-only XOAUTH2.
 
+Recommended tenant setup: a dedicated unlicensed shared mailbox (within
+Microsoft's 50 GB and feature limits) plus claims-less, group-scoped Exchange
+`Application SMTP.SendAsApp`. The app has no mail-reading permission. Follow the
+full Microsoft setup guide linked from the GitHub repository before granting
+access.
+
 ```bash
 docker pull sg1888/postfix-m365-relay:latest
 ```

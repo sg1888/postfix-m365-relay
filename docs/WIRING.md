@@ -1,5 +1,9 @@
 # Wiring applications to the relay
 
+Sender address and display-name policy is covered separately in
+[SENDER-REWRITING.md](SENDER-REWRITING.md), including fixed application names
+such as `Diun [Server A]`, multi-host deployments, and alias passthrough.
+
 Read [NETWORKING.md](NETWORKING.md) for complete same-project, cross-project,
 per-application-isolation, and published-LAN topologies. This document shows
 real application-side SMTP settings.

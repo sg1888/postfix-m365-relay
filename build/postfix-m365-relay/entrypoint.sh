@@ -342,6 +342,19 @@ postconf -M "${RELAY_PORT}/inet=${RELAY_PORT} inet n - n - - smtpd"
 postfix set-permissions >/dev/null 2>&1 || true
 
 token_file=${MAIL_TOKEN_FILE:-$RUN_DIR/relay.json}
+# Make one bounded mint attempt before Postfix can activate a persistent
+# deferred queue.  In the first live restart test, Postfix started a few
+# milliseconds ahead of the token loop, attempted XOAUTH2 with an empty tmpfs,
+# and produced a misleading SASL failure before the next retry succeeded.  The
+# token request itself has a 30-second network timeout, so this gate cannot hold
+# the SMTP listener indefinitely.  If Entra is unavailable—or the first public
+# certificate has not been uploaded yet—we deliberately continue: accepting and
+# durably queueing new mail is safer than making the whole relay unavailable.
+if /usr/local/libexec/mail-relay/refresh-smtp-token.py --min-remaining 1800; then
+  log 'startup token check completed before Postfix activation'
+else
+  log 'startup token mint failed; starting Postfix in queue-first mode while the supervised loop retries'
+fi
 [[ -s $token_file ]] || log "token is not present yet; Postfix will queue mail while the token loop retries"
 # exec makes the Bash supervisor the real PID 1, which is required for signal
 # forwarding and orphan reaping. The PID-1 behaviour has a dedicated kill,

@@ -80,14 +80,15 @@ RUN cp -a /etc/postfix /usr/share/postfix-defaults \
  && ln -s /run/mail-relay/log /var/log/mail-relay
 
 COPY build/postfix-m365-relay/entrypoint.sh build/postfix-m365-relay/relay-supervisor.sh \
-     build/postfix-m365-relay/relay-users /usr/local/bin/
+     build/postfix-m365-relay/relay-users build/postfix-m365-relay/relay-admin /usr/local/bin/
 COPY build/postfix-m365-relay/render-config.sh build/postfix-m365-relay/verify-relay.sh \
      build/postfix-m365-relay/rotate-inbound-tls.sh build/postfix-m365-relay/alert.sh \
+     scripts/alert-event.py \
      scripts/refresh-smtp-token.py \
      scripts/rotate-smtp-relay-cert.py /usr/local/libexec/mail-relay/
 COPY mail-relay.conf.example /usr/share/postfix-m365-relay/mail-relay.conf.example
 RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/relay-supervisor.sh \
-      /usr/local/bin/relay-users /usr/local/libexec/mail-relay/*
+      /usr/local/bin/relay-users /usr/local/bin/relay-admin /usr/local/libexec/mail-relay/*
 
 # Documentation only; the relay is reachable on the mail network and publishes
 # no host port. 2525 rather than 587 so the container needs no

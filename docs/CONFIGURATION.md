@@ -21,7 +21,7 @@ posture.
 |---|---:|---|
 | `MAIL_RELAY_TENANT` | yes | Entra tenant ID |
 | `MAIL_RELAY_CLIENT_ID` | yes | app registration client ID |
-| `MAIL_SEND_MAILBOX` | yes | licensed regular mailbox used for submission |
+| `MAIL_SEND_MAILBOX` | yes | dedicated shared mailbox used only for relay submission (recommended); licensed user mailbox supported |
 | `MAIL_SENDER_<KEY>` | one or more | address an application may use at `MAIL FROM` |
 | `MAIL_SENDER_NAME_<KEY>` | no | forced display name for that sender |
 | `MAIL_ADMIN_EMAIL` | recommended | alert, verification, and rotation-proof recipient |
@@ -83,6 +83,10 @@ Do not call this verified until the SMTP XOAUTH2 app-only alias gate in
 `TESTING.md` has been observed against dedicated test objects.
 `SendFromAliasEnabled` is org-wide.
 
+For fixed-name containers, multiple-host naming, unsupported senders, domain
+choices, mismatched envelope/header addresses, special characters, and complete
+alias requirements, see [SENDER-REWRITING.md](SENDER-REWRITING.md).
+
 ## Inbound policy
 
 | `MAIL_INBOUND_AUTH` | Who can relay | SASL | Default TLS |
@@ -102,6 +106,33 @@ Boot refuses these unsafe or contradictory combinations:
 - trusted networks with policy `off`;
 - any password-auth policy with `MAIL_INBOUND_TLS=off`;
 - password auth without a readable `MAIL_SMTPD_USERS_FILE`.
+
+### Legacy clients without TLS or SSL
+
+SASL without TLS is deliberately unsupported. PLAIN and LOGIN protect neither
+the username nor the password by themselves; they are safe here only because
+Postfix offers them after STARTTLS. The managed configuration always forces
+`smtpd_tls_auth_only=yes` in a SASL mode. Before STARTTLS, AUTH is absent from
+EHLO and an early AUTH command is rejected.
+
+Use one of these patterns for an older printer, scanner, UPS, or appliance:
+
+- `ip`: all permitted clients are admitted by source IP and use no password;
+- `ip-or-auth`: a fixed legacy client is admitted by source IP without a
+  password, while clients outside the allowlist must use STARTTLS plus SASL.
+
+Do not configure a SASL username or password on the legacy client. Use the
+narrowest possible `/32` address (or a tightly controlled device VLAN), bind
+the published port to one LAN address, and enforce the same source restriction
+in the firewall. The legacy client-to-relay hop is plaintext, although the
+relay-to-Microsoft hop still uses verified TLS. A legacy device across an
+untrusted network needs a local TLS-capable SMTP gateway; disabling
+TLS-before-AUTH is not an available compatibility option.
+
+`smtp-auth` and `ip-and-auth` cannot serve a client that lacks STARTTLS because
+both policies require SASL. `MAIL_INBOUND_TLS=may` does not weaken this rule:
+it permits an allowlisted IP client to remain plaintext, but AUTH remains
+unavailable until STARTTLS completes.
 
 ### `off`
 
@@ -228,6 +259,11 @@ Do not weaken AlmaLinux crypto policy for TLS-1.0-only hardware; use IP policy.
 | `MAIL_VERIFY_LOOP_SECONDS` | `3600` |
 | `MAIL_VERIFY_SEND` | `yes` when an admin email exists |
 | `MAIL_CA_BUNDLE_MAX_AGE_DAYS` | `90` |
+| `MAIL_TOKEN_ALERT_AFTER` | `3` consecutive failures |
+| `MAIL_QUEUE_WARN_DEPTH` | `25` deferred messages |
+| `MAIL_SASL_FAILURE_WARN_COUNT` | `10` recent failures |
+| `MAIL_ALERT_WEBHOOK` | empty; optional independent JSON incident receiver |
+| `MAIL_RUNBOOK_URL` | public project runbook URL used in notifications |
 
 Loop timing overrides are primarily for isolated tests. Rotation always stages,
 adds, waits for replication, proves token and delivery, swaps atomically,
@@ -258,10 +294,25 @@ re-mints immediately, and retires the old key on a later run.
   restart onto the reviewed digest, retain the state/spool volumes, and monitor
   the hourly probes and rotation alerts.
 
-The verifier reports an image CA bundle older than 90 days and repeats an
-email/webhook maintenance warning weekly. This does not mutate a running image;
-replace it with a tested, current image digest. Increase the threshold only if
+The verifier opens one durable incident when the image CA bundle exceeds 90
+days; repeated checks update that incident without duplicate notifications. A
+tested image replacement clears it with the same reference and elapsed
+duration. This does not mutate a running image. Increase the threshold only if
 your organization has a different documented patch cadence.
+
+### Alert webhook and incident data
+
+`MAIL_ALERT_WEBHOOK` receives a JSON object for each incident open/recovery and
+one-time informational notice. It includes a schema version, status, severity,
+event, stable reference, relay name, UTC/local timestamps, timezone, duration,
+occurrence count, redacted evidence, likely causes, remediation, and runbook
+URL. Use a TLS URL in production and treat the endpoint itself as sensitive
+configuration. The relay never places this URL in notification bodies.
+
+Email and webhook delivery are independent. Failed deliveries remain under the
+persistent state volume and retry with bounded backoff. Configure both when
+possible: email uses the same Postfix/OAuth route being monitored, while the
+webhook can still report that route's failure.
 
 ### Corporate TLS inspection
 

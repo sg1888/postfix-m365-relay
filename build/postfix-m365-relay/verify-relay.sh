@@ -7,26 +7,10 @@ set -uo pipefail
 failures=() warnings=()
 declare -A category_failed=([relay]=0 [token]=0 [certificate]=0 [rotation]=0)
 declare -A category_message=([relay]='listener not checked' [token]='token not checked' [certificate]='certificate not checked' [rotation]='rotation not checked')
+declare -A category_event=([relay]=relay-health [token]=token-health [certificate]=oauth-certificate-health [rotation]=oauth-rotation-health)
 say() { printf '%s verify-relay: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 bad() { local category=$1; shift; failures+=("$*"); category_failed[$category]=1; category_message[$category]="$*"; say "FAILED $category: $*"; }
 warn() { warnings+=("$*"); say "warning: $*"; }
-warn_and_alert_periodically() {
-  # Warnings such as an aging CA bundle should not mark SMTP unhealthy, but a
-  # log-only warning can remain invisible for years. Persist one tiny timestamp
-  # per event so email/webhook notification repeats weekly without firing on
-  # every hourly verifier pass. The marker contains no credential or mail data.
-  local event=$1 detail=$2 repeat_days=${3:-7} now marker last=0 temporary
-  now=$(date +%s)
-  marker=${STATE_DIR:-/var/lib/mail-relay}/.warning-$event-epoch
-  [[ -r $marker ]] && read -r last < "$marker"
-  [[ $last =~ ^[0-9]+$ ]] || last=0
-  if (( now - last >= repeat_days * 86400 )); then
-    /usr/local/libexec/mail-relay/alert.sh warning "$event" "$detail" || true
-    temporary=$marker.tmp.$$
-    printf '%s\n' "$now" > "$temporary"
-    mv -f -- "$temporary" "$marker"
-  fi
-}
 submit_probe() {
   local from=$1 subject=$2 message_id=$3
   VERIFY_FROM=$from VERIFY_TO=$MAIL_ADMIN_EMAIL VERIFY_SUBJECT=$subject VERIFY_ID=$message_id python3 - <<'PY'
@@ -92,7 +76,20 @@ if [[ -s $oauth_cert ]]; then
 else bad certificate 'OAuth certificate is absent'; fi
 
 if [[ ${MAIL_INBOUND_TLS:-off} != off && -n ${MAIL_INBOUND_TLS_CERT_EFFECTIVE:-} ]]; then
-  openssl x509 -checkend $((30*86400)) -noout -in "$MAIL_INBOUND_TLS_CERT_EFFECTIVE" >/dev/null 2>&1 || warn 'inbound TLS certificate expires within 30 days'
+  if openssl x509 -checkend $((30*86400)) -noout -in "$MAIL_INBOUND_TLS_CERT_EFFECTIVE" >/dev/null 2>&1; then
+    /usr/local/libexec/mail-relay/alert.sh recover inbound-tls-expiring \
+      'The inbound STARTTLS certificate is outside the 30-day warning window' || true
+  else
+    warn 'inbound TLS certificate expires within 30 days'
+    /usr/local/libexec/mail-relay/alert.sh open warning inbound-tls-expiring \
+      'Inbound STARTTLS certificate expires within 30 days' || true
+  fi
+else
+  # If an operator disables inbound TLS after an expiry warning, that warning
+  # no longer describes an active condition. Clear it explicitly instead of
+  # leaving a stale incident in the persistent state volume.
+  /usr/local/libexec/mail-relay/alert.sh recover inbound-tls-expiring \
+    'Inbound STARTTLS is disabled; no server certificate requires renewal' || true
 fi
 
 # A running image is immutable: its public root store does not receive distro
@@ -106,7 +103,10 @@ if [[ $ca_install_epoch =~ ^[0-9]+$ && $ca_max_age_days =~ ^[0-9]+$ ]]; then
   if (( ca_age_days > ca_max_age_days )); then
     ca_detail="image CA bundle is ${ca_age_days} days old; rebuild, test, pull, and recreate the container"
     warn "$ca_detail"
-    warn_and_alert_periodically ca-bundle-age "$ca_detail" 7
+    /usr/local/libexec/mail-relay/alert.sh open warning ca-bundle-age "$ca_detail" || true
+  else
+    /usr/local/libexec/mail-relay/alert.sh recover ca-bundle-age \
+      "Image CA bundle age is within the configured ${ca_max_age_days}-day limit" || true
   fi
 else
   bad certificate 'could not determine CA-bundle package age or MAIL_CA_BUNDLE_MAX_AGE_DAYS is invalid'
@@ -122,11 +122,25 @@ if [[ -s $rotation_log ]]; then
 else category_message[rotation]='no rotation has been required yet'; fi
 
 queue_depth=$(find /var/spool/postfix/deferred -type f 2>/dev/null | wc -l | tr -d ' ')
-(( queue_depth <= ${MAIL_QUEUE_WARN_DEPTH:-25} )) || warn "deferred queue has $queue_depth messages"
+if (( queue_depth > ${MAIL_QUEUE_WARN_DEPTH:-25} )); then
+  warn "deferred queue has $queue_depth messages"
+  /usr/local/libexec/mail-relay/alert.sh open warning queue-depth-health \
+    "Deferred queue has $queue_depth messages; warning threshold is ${MAIL_QUEUE_WARN_DEPTH:-25}" || true
+else
+  /usr/local/libexec/mail-relay/alert.sh recover queue-depth-health \
+    "Deferred queue recovered to $queue_depth messages" || true
+fi
 log_file=/var/log/mail-relay/postfix.log
 if [[ -r $log_file ]]; then
   sasl_failures=$(tail -n 2000 "$log_file" | grep -Eci 'SASL.*(fail|authentication failed)|authentication failure' || true)
-  (( sasl_failures <= ${MAIL_SASL_FAILURE_WARN_COUNT:-10} )) || warn "$sasl_failures recent SASL failures"
+  if (( sasl_failures > ${MAIL_SASL_FAILURE_WARN_COUNT:-10} )); then
+    warn "$sasl_failures recent SASL failures"
+    /usr/local/libexec/mail-relay/alert.sh open warning sasl-auth-health \
+      "$sasl_failures recent SASL failures exceed threshold ${MAIL_SASL_FAILURE_WARN_COUNT:-10}" || true
+  else
+    /usr/local/libexec/mail-relay/alert.sh recover sasl-auth-health \
+      "Recent SASL failures are within threshold (${sasl_failures:-0})" || true
+  fi
 fi
 
 if [[ -n ${MAIL_ADMIN_EMAIL:-} && ${MAIL_VERIFY_SEND:-yes} == yes ]]; then
@@ -141,6 +155,8 @@ if [[ -n ${MAIL_ADMIN_EMAIL:-} && ${MAIL_VERIFY_SEND:-yes} == yes ]]; then
   else bad relay 'end-to-end probe was refused at local submission'; fi
 fi
 
+alias_failed=0
+alias_evidence='All configured passthrough alias probes were observed sent'
 if [[ ${MAIL_SENDER_MODE:-collapse} == passthrough && -n ${MAIL_PASSTHROUGH_SENDERS:-} && -n ${MAIL_ADMIN_EMAIL:-} ]]; then
   # This is the recurring tenant-side validity check for passthrough aliases.
   # Local map tests cannot prove Exchange accepts an alias with app-only OAuth;
@@ -151,16 +167,25 @@ if [[ ${MAIL_SENDER_MODE:-collapse} == passthrough && -n ${MAIL_PASSTHROUGH_SEND
     [[ -n $alias ]] || continue
     alias_id="verify-alias-$(date +%s)-$RANDOM-$$@${MAIL_RELAY_DOMAIN:-relay.example.local}"
     if ! submit_probe "$alias" "postfix-m365-relay alias verification: $alias" "$alias_id"; then
-      bad relay "passthrough alias $alias was refused at local submission"
+      alias_failed=1; alias_evidence="passthrough alias $alias was refused at local submission"
+      failures+=("$alias_evidence"); say "FAILED alias: $alias_evidence"
     elif ! wait_for_sent_message "$alias_id" "${MAIL_VERIFY_DELIVERY_WAIT_SECONDS:-15}"; then
-      bad relay "passthrough alias $alias was not observed delivered"
+      alias_failed=1; alias_evidence="passthrough alias $alias was not observed delivered"
+      failures+=("$alias_evidence"); say "FAILED alias: $alias_evidence"
     else
       say "alias verified by upstream delivery: $alias"
     fi
   done
 fi
+if (( alias_failed )); then
+  /usr/local/libexec/mail-relay/alert.sh open error alias-health "$alias_evidence" || true
+else
+  /usr/local/libexec/mail-relay/alert.sh recover alias-health "$alias_evidence" || true
+fi
 
 push_base=${MAIL_RELAY_PUSH_BASE:-}
+push_failed=0
+push_evidence='All configured push monitors accepted their current status'
 # Push tokens are individual mounted files so exposing one monitor does not
 # expose the others. The status message is character-filtered before entering a
 # URL; bearer tokens, mail content, and raw log lines are never transmitted.
@@ -170,12 +195,31 @@ if [[ -n $push_base ]]; then
     [[ -s $secret ]] || continue
     push_token=$(tr -d '\r\n' < "$secret"); status=up; (( category_failed[$category] == 0 )) || status=down
     message=$(printf %s "${category_message[$category]}" | tr ' ' '+' | tr -cd 'A-Za-z0-9+._:;,()-')
-    curl -fsS --max-time 15 "$push_base/$push_token?status=$status&msg=$message" >/dev/null || warn "could not reach $category push monitor"
+    if ! curl -fsS --max-time 15 "$push_base/$push_token?status=$status&msg=$message" >/dev/null; then
+      push_failed=1; push_evidence="could not reach $category push monitor"
+      warn "$push_evidence"
+    fi
   done
 fi
-
-if (( ${#failures[@]} > 0 )); then
-  /usr/local/libexec/mail-relay/alert.sh error verification "${failures[*]}" || true
-  exit 1
+if (( push_failed )); then
+  /usr/local/libexec/mail-relay/alert.sh open warning push-monitor-health "$push_evidence" || true
+else
+  /usr/local/libexec/mail-relay/alert.sh recover push-monitor-health "$push_evidence" || true
 fi
+
+# Every hard-failure category owns one durable incident. The token verifier and
+# token refresh loop intentionally share token-health, preventing the same Entra
+# outage from producing competing threshold and "token absent" notifications.
+for category in relay token certificate rotation; do
+  event=${category_event[$category]}
+  if (( category_failed[$category] )); then
+    /usr/local/libexec/mail-relay/alert.sh open error "$event" \
+      "${category_message[$category]}" || true
+  else
+    /usr/local/libexec/mail-relay/alert.sh recover "$event" \
+      "${category_message[$category]}" || true
+  fi
+done
+
+(( ${#failures[@]} == 0 )) || exit 1
 say "healthy (${#warnings[@]} warning(s))"

@@ -13,6 +13,11 @@ tests=(
   container-end-to-end.sh
   container-upstream-tls.sh
   container-spool-recovery.sh
+  container-alert-incidents.sh
+  container-alert-trigger-matrix.sh
+  container-oauth-rotation-alert.sh
+  container-inbound-tls-rotation-alert.sh
+  container-invalid-alias-alert.sh
   container-config-matrix.sh
   container-first-run-config.sh
   container-sasl-user-lifecycle.sh

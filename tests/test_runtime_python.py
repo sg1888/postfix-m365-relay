@@ -15,6 +15,7 @@ import io
 import json
 import os
 import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +36,7 @@ def load_module(name: str, relative_path: str):
 refresh = load_module("refresh_smtp_token", "scripts/refresh-smtp-token.py")
 rotate = load_module("rotate_smtp_relay_cert", "scripts/rotate-smtp-relay-cert.py")
 qualify = load_module("qualify_relay", "scripts/qualify-relay.py")
+alert = load_module("alert_event", "scripts/alert-event.py")
 
 
 def decode_segment(segment: str) -> dict:
@@ -94,6 +96,77 @@ class CertificateTests(unittest.TestCase):
                 }
                 with self.subTest(parent=parent), self.assertRaises(ValueError):
                     rotate.Rotation(root, env, root / "rotation.log", True)
+
+    def test_pending_added_key_is_adopted_only_when_thumbprint_matches_live_cert(self):
+        from cryptography.hazmat.primitives import hashes
+
+        _key, cert = rotate.make_certificate(10, 2048, "Crash recovery")
+        live_thumbprint = cert.fingerprint(hashes.SHA1()).hex().upper()
+        self.assertTrue(
+            rotate.pending_addition_is_live(
+                {"key_id": "new-key", "thumbprint": live_thumbprint}, cert
+            )
+        )
+        self.assertFalse(
+            rotate.pending_addition_is_live(
+                {"key_id": "abandoned-key", "thumbprint": "00" * 20}, cert
+            )
+        )
+
+    def test_rotation_state_persists_exact_pending_added_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "state" / "rotation.json"
+            env = {
+                "MAIL_RELAY_TENANT": "tenant",
+                "MAIL_RELAY_CLIENT_ID": "client",
+                "MAIL_SEND_MAILBOX": "relay@example.invalid",
+                "MAIL_RELAY_KEY_FILE": str(root / "secrets" / "key.pem"),
+                "MAIL_RELAY_CERT_FILE": str(root / "secrets" / "cert.pem"),
+                "MAIL_ROTATION_STATE_FILE": str(state_path),
+            }
+            rotation = rotate.Rotation(root, env, root / "rotation.log", False)
+            expected = {
+                "pending_addition": {
+                    "key_id": "exact-added-key-id",
+                    "thumbprint": "AB" * 20,
+                    "added_at": 1_700_000_000,
+                }
+            }
+            rotation.write_state(expected)
+            self.assertEqual(rotation.read_state(), expected)
+            self.assertFalse(state_path.with_suffix(".tmp").exists())
+
+    def test_immediate_refresh_receives_file_loaded_configuration(self):
+        env = {
+            "MAIL_RELAY_TENANT": "tenant-from-file",
+            "MAIL_RELAY_CLIENT_ID": "client-from-file",
+            "MAIL_SEND_MAILBOX": "relay@example.invalid",
+            "MAIL_RELAY_KEY_FILE": "/state/secrets/key.pem",
+        }
+        completed = mock.Mock(returncode=0)
+        with mock.patch.object(rotate.subprocess, "run", return_value=completed) as run:
+            self.assertTrue(
+                rotate.run_immediate_token_refresh(
+                    Path("/image/refresh-smtp-token.py"),
+                    Path("/config/mail-relay.conf"),
+                    env,
+                )
+            )
+        command = run.call_args.args[0]
+        child_env = run.call_args.kwargs["env"]
+        self.assertEqual(
+            command,
+            [
+                "/image/refresh-smtp-token.py",
+                "--quiet",
+                "--env-file",
+                "/config/mail-relay.conf",
+            ],
+        )
+        self.assertEqual(child_env["MAIL_RELAY_TENANT"], "tenant-from-file")
+        self.assertEqual(child_env["MAIL_RELAY_CLIENT_ID"], "client-from-file")
+        self.assertNotIn("PRIVATE KEY", " ".join(command))
 
 
 class AssertionAndTokenTests(unittest.TestCase):
@@ -169,7 +242,63 @@ class AssertionAndTokenTests(unittest.TestCase):
             self.assertEqual(payload["access_token"], "safe-test-token")
             self.assertIn("unused-app-only", payload["refresh_token"])
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-            self.assertFalse(path.with_suffix(".tmp").exists())
+            self.assertEqual(list(path.parent.glob(f".{path.name}.tmp.*")), [])
+
+    def test_token_rename_failure_preserves_existing_good_file(self):
+        """A failed atomic commit must not trade an outage for stale-but-valid mail."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "relay.json"
+            path.write_text('{"access_token":"existing-safe-token","expiry":"2000000000"}')
+            with mock.patch.object(
+                refresh.os,
+                "replace",
+                side_effect=OSError(30, "Read-only file system"),
+            ):
+                with self.assertRaisesRegex(refresh.TokenFileError, "Read-only file system"):
+                    refresh.write_token_file(path, "new-safe-token", 3600)
+            self.assertIn("existing-safe-token", path.read_text())
+            self.assertNotIn("new-safe-token", path.read_text())
+            self.assertEqual(list(path.parent.glob(f".{path.name}.tmp.*")), [])
+
+    def test_token_open_permission_failure_is_concise_and_leaves_no_partial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "relay.json"
+            with mock.patch.object(
+                refresh.os,
+                "open",
+                side_effect=PermissionError(13, "Permission denied"),
+            ):
+                with self.assertRaisesRegex(refresh.TokenFileError, "Permission denied") as caught:
+                    refresh.write_token_file(path, "must-never-appear-in-error", 3600)
+            self.assertNotIn("must-never-appear-in-error", str(caught.exception))
+            self.assertFalse(path.exists())
+            self.assertEqual(list(path.parent.glob(f".{path.name}.tmp.*")), [])
+
+    def test_token_missing_parent_creation_failure_is_concise(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "uncreatable" / "relay.json"
+            with mock.patch.object(
+                refresh.Path,
+                "mkdir",
+                side_effect=OSError(13, "Permission denied"),
+            ):
+                with self.assertRaisesRegex(refresh.TokenFileError, "Permission denied"):
+                    refresh.write_token_file(path, "safe-test-token", 3600)
+            self.assertFalse(path.exists())
+
+    def test_token_chown_failure_does_not_publish_root_only_staging_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "relay.json"
+            path.write_text('{"access_token":"existing-safe-token","expiry":"2000000000"}')
+            with mock.patch.object(
+                refresh.os,
+                "chown",
+                side_effect=PermissionError(1, "Operation not permitted"),
+            ):
+                with self.assertRaisesRegex(refresh.TokenFileError, "Operation not permitted"):
+                    refresh.write_token_file(path, "new-safe-token", 3600, group=123)
+            self.assertIn("existing-safe-token", path.read_text())
+            self.assertEqual(list(path.parent.glob(f".{path.name}.tmp.*")), [])
 
 
 class EnvFileTests(unittest.TestCase):
@@ -241,6 +370,92 @@ class QualificationClientTests(unittest.TestCase):
                 self.assertEqual(qualify.main(), 0)
         self.assertIn("starttls", smtp.calls)
         self.assertIn(("login", "device", "file-only-secret"), smtp.calls)
+
+
+class AlertIncidentTests(unittest.TestCase):
+    def test_payload_has_reference_times_duration_guidance_and_redaction(self):
+        incident = {
+            "event": "token-health",
+            "severity": "error",
+            "reference_id": "PMR-TEST-1234",
+            "first_observed_epoch": 1_700_000_000,
+            "occurrence_count": 3,
+        }
+        environment = {
+            "TZ": "America/New_York",
+            "MAIL_RELAY_HOSTNAME": "relay [test]",
+        }
+        evidence = (
+            "AADSTS900021 Trace ID: safe-trace Correlation ID: safe-correlation "
+            "Bearer must-not-leak eyJabcdefghijklmnopqrstuv.abcdefghijk.abcdefghijk"
+        )
+        with mock.patch.dict(os.environ, environment, clear=False):
+            payload = alert.build_payload(incident, "recovered", 1_700_000_125, evidence)
+        self.assertEqual(payload["reference_id"], "PMR-TEST-1234")
+        self.assertEqual(payload["duration_seconds"], 125)
+        self.assertEqual(payload["timezone"], "America/New_York")
+        self.assertNotEqual(payload["observed_utc"], payload["observed_local"])
+        self.assertIn("safe-correlation", payload["evidence"])
+        self.assertNotIn("must-not-leak", payload["evidence"])
+        self.assertNotIn("eyJabcdefghijklmnopqrstuv", payload["evidence"])
+        self.assertTrue(payload["likely_causes"])
+        self.assertTrue(payload["remediation"])
+        self.assertIn("RUNBOOK", payload["runbook_url"].upper())
+
+    def test_open_is_restart_durable_duplicate_suppressed_and_recovered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = {"MAIL_ALERT_STATE_DIR": directory, "TZ": "UTC"}
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch.object(alert.time, "time", side_effect=[1000, 1000, 1010, 1010, 1060, 1060]), \
+                    mock.patch.object(alert.secrets, "token_hex", return_value="a1b2c3d4"):
+                for argv in (
+                    ["alert-event.py", "open", "error", "token-health", "first failure"],
+                    ["alert-event.py", "open", "error", "token-health", "second failure"],
+                ):
+                    with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(alert.main(), 0)
+                incident_path = Path(directory) / "incidents" / "token-health.json"
+                incident = json.loads(incident_path.read_text())
+                self.assertEqual(incident["reference_id"], "PMR-19700101-A1B2C3D4")
+                self.assertEqual(incident["occurrence_count"], 2)
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    ["alert-event.py", "recover", "token-health", "fresh token minted"],
+                ), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(alert.main(), 0)
+                self.assertFalse(incident_path.exists())
+
+    def test_failed_email_does_not_suppress_webhook_and_remains_retryable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outbox = Path(directory) / "outbox.json"
+            payload = {
+                "reference_id": "PMR-TEST-CHANNELS",
+                "status": "open",
+                "severity": "error",
+                "event": "relay-health",
+            }
+            alert.atomic_json(
+                outbox,
+                {"payload": payload, "email_pending": True, "webhook_pending": True},
+            )
+            with mock.patch.object(alert, "deliver_email", return_value=(False, "listener down")), \
+                    mock.patch.object(alert, "deliver_webhook", return_value=(True, "HTTP success")), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(alert.attempt_outbox(outbox))
+            retained = json.loads(outbox.read_text())
+            self.assertTrue(retained["email_pending"])
+            self.assertFalse(retained["webhook_pending"])
+            self.assertEqual(retained["email_attempts"], 1)
+            self.assertGreater(retained["email_next_attempt_epoch"], alert.time.time())
+            # A second health category in the same verifier run must not make
+            # another connection attempt before the persisted backoff expires.
+            with mock.patch.object(alert, "deliver_email") as email, \
+                    mock.patch.object(alert, "deliver_webhook") as webhook, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(alert.attempt_outbox(outbox))
+            email.assert_not_called()
+            webhook.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -23,6 +23,8 @@ validity_days=${MAIL_INBOUND_TLS_VALIDITY_DAYS:-3650}
   fail 'MAIL_INBOUND_TLS_VALIDITY_DAYS must exceed MAIL_INBOUND_TLS_RENEW_AT_DAYS'
 
 if openssl x509 -checkend $((renew_days * 86400)) -noout -in "$cert" >/dev/null 2>&1; then
+  /usr/local/libexec/mail-relay/alert.sh recover inbound-tls-expiring \
+    'The inbound STARTTLS certificate is now outside its renewal window' || true
   exit 0
 fi
 
@@ -31,7 +33,7 @@ if [[ ${MAIL_INBOUND_TLS_MANAGED:-no} != yes ]]; then
   # secret manager. Mutating that mount would violate ownership and often fail
   # on read-only Docker secrets, so alert and let the external owner replace it.
   expiry=$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2- || true)
-  /usr/local/libexec/mail-relay/alert.sh warning inbound-tls-expiring \
+  /usr/local/libexec/mail-relay/alert.sh open warning inbound-tls-expiring \
     "BYO inbound STARTTLS certificate needs external renewal; expires ${expiry:-unknown}" || true
   log "BYO certificate is inside its ${renew_days}-day renewal window; external renewal required"
   exit 0
@@ -69,5 +71,7 @@ else
 fi
 expiry=$(openssl x509 -enddate -noout -in "$cert" | cut -d= -f2-)
 log "renewed generated certificate with the existing key; expires $expiry"
-/usr/local/libexec/mail-relay/alert.sh info inbound-tls-rotated \
+/usr/local/libexec/mail-relay/alert.sh recover inbound-tls-expiring \
+  "Managed inbound STARTTLS certificate was renewed and expires $expiry" || true
+/usr/local/libexec/mail-relay/alert.sh notify info inbound-tls-rotated \
   "Generated inbound STARTTLS certificate renewed; expires $expiry" || true

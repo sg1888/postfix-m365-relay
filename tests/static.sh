@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Fast, network-free checks run before the comparatively expensive image build.
 # Keep the file lists explicit enough that new runtime scripts are visible in a
-# review. GitHub's hosted runner does not guarantee ripgrep, so use POSIX find
-# here; developers can still use rg for interactive discovery.
+# review. File enumeration uses POSIX find because hosted CI does not guarantee
+# ripgrep; the policy/documentation assertions below still use rg when present.
 set -euo pipefail
 
 repo_files() {
@@ -10,11 +10,46 @@ repo_files() {
 }
 
 # Keep this runner compatible with Bash 3.2, which has arrays but not `mapfile`.
-# Paths in this repository contain no whitespace, so word-splitting the rg
+# Paths in this repository contain no whitespace, so word-splitting the file
 # result is safe across supported development and CI toolchains.
 shell_files=($(repo_files build/postfix-m365-relay scripts tests | awk '/\.sh$|\/relay-users$|\/relay-admin$/' | sort -u))
 bash -n "${shell_files[@]}"
-python3 -m py_compile $(repo_files scripts tests | awk '/\.py$/')
+python3 -m py_compile scripts/refresh-smtp-token.py scripts/rotate-smtp-relay-cert.py \
+  $(repo_files tests | awk '/\.py$/')
+
+# Hosted CI runners include PowerShell; local systems may not. Parse both
+# tenant-configuration scripts whenever pwsh is available. This catches syntax
+# damage without connecting to Exchange or changing external state.
+if command -v pwsh >/dev/null 2>&1; then
+  pwsh -NoProfile -Command '
+    $failed = $false
+    foreach ($path in @("powershell/setup-exchange.ps1", "powershell/undo-exchange.ps1")) {
+      $tokens = $null; $errors = $null
+      [System.Management.Automation.Language.Parser]::ParseFile(
+        (Resolve-Path $path), [ref]$tokens, [ref]$errors) | Out-Null
+      if ($errors.Count) {
+        $errors | ForEach-Object { Write-Error "${path}: $_" }
+        $failed = $true
+      }
+    }
+    if ($failed) { exit 1 }
+  '
+fi
+
+# The mailbox authorization model is security-sensitive documentation-as-code.
+# These assertions guard the live-proven claims-less App RBAC design against an
+# accidental return to the older licensed-user + FullAccess instructions.
+rg -q "RecipientTypeDetails = SharedMailbox \(recommended\)" powershell/setup-exchange.ps1
+rg -q "New-ManagementScope" powershell/setup-exchange.ps1
+rg -q "Application SMTP.SendAsApp" powershell/setup-exchange.ps1
+rg -q "Test-ServicePrincipalAuthorization" powershell/setup-exchange.ps1
+if rg -q "Add-MailboxPermission" powershell/setup-exchange.ps1; then
+  echo 'setup script must not grant FullAccess in claims-less App RBAC' >&2
+  exit 1
+fi
+rg -q "dedicated shared mailbox" README.md docs/MICROSOFT-SETUP.md
+rg -q "smtp-app-rbac-onboarding" docs/MICROSOFT-SETUP.md
+rg -q "application-rbac" docs/MICROSOFT-SETUP.md
 
 # The existing toolchains include Ruby's YAML parser. Parsing catches
 # indentation damage without downloading another Python dependency.

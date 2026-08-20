@@ -110,6 +110,7 @@ docker run -d --name "$container" --network none \
   -e MAIL_RELAY_CLIENT_ID=11111111-1111-1111-1111-111111111111 \
   -e MAIL_SEND_MAILBOX=relay-test@example.invalid \
   -e MAIL_SENDER_APP=app@relay.example.local \
+  -e MAIL_SENDER_ALLOWLIST=on \
   -e MAIL_INBOUND_AUTH=ip-or-auth -e MAIL_INBOUND_TLS=may \
   -e MAIL_SMTPD_USERS_FILE=/run/secrets/smtpd_users \
   -e POSTFIX_smtp_dns_support_level=disabled \

@@ -10,6 +10,7 @@ image=${1:-postfix-m365-relay:test}
 tests=(
   python-unit.sh
   container-sender-names.sh
+  container-optional-sender.sh
   container-end-to-end.sh
   container-upstream-tls.sh
   container-spool-recovery.sh

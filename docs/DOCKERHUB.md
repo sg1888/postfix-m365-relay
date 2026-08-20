@@ -8,7 +8,7 @@ Set it up right: a dedicated unlicensed shared mailbox (under Microsoft's 50 GB 
 docker pull sg1888/postfix-m365-relay:latest
 ```
 
-Required configuration: `MAIL_RELAY_TENANT`, `MAIL_RELAY_CLIENT_ID`, `MAIL_SEND_MAILBOX`, and at least one `MAIL_SENDER_*`. Add `MAIL_ADMIN_EMAIL` for alerts and proof messages. Mount a persistent writable directory at `/config`; first startup creates the commented `mail-relay.conf` there and waits for the required values. Persist `/var/lib/mail-relay` and `/var/spool/postfix`; keep `/run/mail-relay` on tmpfs. The default posture publishes no port.
+Required configuration: `MAIL_RELAY_TENANT`, `MAIL_RELAY_CLIENT_ID`, and `MAIL_SEND_MAILBOX`. Named senders (`MAIL_SENDER_*`) are optional — with none set, every message is sent as `MAIL_SEND_MAILBOX` keeping the app-supplied display name; set `MAIL_SENDER_ALLOWLIST=on` to restrict envelope senders to registered addresses. Add `MAIL_ADMIN_EMAIL` for alerts and proof messages. Mount a persistent writable directory at `/config`; first startup creates the commented `mail-relay.conf` there and waits for the required values. Persist `/var/lib/mail-relay` and `/var/spool/postfix`; keep `/run/mail-relay` on tmpfs. The default posture publishes no port.
 
 The default `latest` (Ubuntu) runs on any x86-64 CPU — including virtual machines and older/budget chips — plus arm64. Optimized AlmaLinux builds are opt-in: `alma-v3` (needs AVX2) and `alma-v2` (needs SSE4.2, amd64 only). Pin a digest after testing.
 

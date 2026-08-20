@@ -1,0 +1,71 @@
+# Same-project example with three popular notification workloads. Pin all images
+# to reviewed releases/digests in production; `latest` keeps this file readable.
+services:
+  postfix-m365-relay:
+    image: docker.io/sg1888/postfix-m365-relay:latest
+    restart: unless-stopped
+    expose: ["2525"]
+    volumes:
+      - ../config:/config
+      - mail-relay-state:/var/lib/mail-relay
+      - mail-relay-spool:/var/spool/postfix
+    tmpfs:
+      - /run/mail-relay:rw,nosuid,noexec,mode=0750
+    networks:
+      mail-relay:
+        aliases: [postfix-m365-relay]
+
+  grafana:
+    image: docker.io/grafana/grafana:latest
+    restart: unless-stopped
+    environment:
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: postfix-m365-relay:2525
+      GF_SMTP_FROM_ADDRESS: grafana@relay.example.local
+      GF_SMTP_FROM_NAME: Grafana alerts
+      GF_SMTP_STARTTLS_POLICY: NoStartTLS
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks: [grafana-internal, mail-relay]
+
+  gitea:
+    image: docker.gitea.com/gitea:latest
+    restart: unless-stopped
+    environment:
+      GITEA__mailer__ENABLED: "true"
+      GITEA__mailer__PROTOCOL: smtp
+      GITEA__mailer__SMTP_ADDR: postfix-m365-relay
+      GITEA__mailer__SMTP_PORT: "2525"
+      GITEA__mailer__FROM: Gitea notifications <gitea@relay.example.local>
+      # USER/PASSWD are intentionally absent in private Docker-network mode.
+      GITEA__service__ENABLE_NOTIFY_MAIL: "true"
+    volumes:
+      - gitea-data:/data
+    networks: [gitea-internal, mail-relay]
+
+  alertmanager:
+    image: quay.io/prometheus/alertmanager:latest
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks: [monitoring-internal, mail-relay]
+
+networks:
+  # Databases/backends can remain only on these application networks. Only the
+  # process that actually sends mail needs `mail-relay` membership.
+  grafana-internal:
+    internal: true
+  gitea-internal:
+    internal: true
+  monitoring-internal:
+    internal: true
+  mail-relay:
+    # Leave non-internal so the relay can reach Microsoft.
+
+volumes:
+  mail-relay-state:
+  mail-relay-spool:
+  grafana-data:
+  gitea-data:

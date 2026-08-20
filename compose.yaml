@@ -1,0 +1,53 @@
+# Complete Docker-only deployment. On first boot the container creates
+# ./config/mail-relay.conf from its documented sample, then waits until the
+# administrator fills in the required values. The directory remains on the
+# host and survives container replacement.
+services:
+  postfix-m365-relay:
+    image: ${MAIL_IMAGE:-docker.io/sg1888/postfix-m365-relay:latest}
+    container_name: postfix-m365-relay
+    restart: unless-stopped
+
+    # `expose` documents the container port. It does not publish a host/LAN
+    # port; other containers must join `mail-relay` to connect.
+    expose:
+      - "2525"
+
+    volumes:
+      # Human-edited settings and optional device-password source file.
+      - ./config:/config
+      # Container engines do not automatically copy the server timezone. Set
+      # TZ in mail-relay.conf, or intentionally enable this server-time mount:
+      # - /etc/localtime:/etc/localtime:ro
+      # OAuth private key/rotation state and deferred message bodies must both
+      # survive image upgrades and container replacement.
+      - mail-relay-state:/var/lib/mail-relay
+      - mail-relay-spool:/var/spool/postfix
+
+    # Access tokens, supervisor PIDs, sasldb2, and rendered CA material are
+    # deliberately ephemeral.
+    tmpfs:
+      - /run/mail-relay:rw,nosuid,noexec,mode=0750
+
+    networks:
+      mail-relay:
+        aliases: [postfix-m365-relay]
+
+    healthcheck:
+      test: ["CMD-SHELL", "printf 'QUIT\\r\\n' | nc -w 3 127.0.0.1 $${RELAY_PORT:-2525} | grep -q '^220 '"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+# This ordinary bridge permits outbound NAT to Microsoft. Do not set
+# `internal: true` unless the relay also has a separate egress network.
+networks:
+  mail-relay:
+    name: mail-relay
+
+volumes:
+  mail-relay-state:
+    name: mail-relay-state
+  mail-relay-spool:
+    name: mail-relay-spool

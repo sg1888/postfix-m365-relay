@@ -1,0 +1,33 @@
+.git
+.github
+.agents
+.codex
+
+# Real deployment configuration and all credential/state formats must never
+# enter a build context. The example configuration file remains available.
+/config
+mail-relay.conf
+.env
+*.env
+!*.env.example
+mail-relay.env
+runtime
+secrets
+appdata
+*.pem
+*.pfx
+*.key
+*.crt
+*.bak
+
+# Private planning/outage records exist only in the internal source workspace.
+# These exclusions are defense in depth; they are absent from the public repo.
+docs/PLAN.md
+docs/FINDINGS.md
+docs/DESIGN.md
+docs/MIGRATION.md
+docs/session-notes
+
+__pycache__
+*.pyc
+.DS_Store

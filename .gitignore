@@ -1,0 +1,26 @@
+# Never commit generated configuration: it names your tenant, app, and mailbox,
+# and its secrets directory may contain device passwords.
+/config/
+mail-relay.conf
+mail-relay.env
+.env
+*.env
+!*.env.example
+
+# Credentials. The private key must never leave the host that generated it.
+runtime/
+secrets/
+*.pem
+*.pfx
+*.key
+*.crt
+
+# Generated at deploy time
+appdata/
+compose.override.yaml
+*.bak
+
+# Editor and filesystem metadata
+.DS_Store
+__pycache__/
+*.pyc

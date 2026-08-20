@@ -1,0 +1,34 @@
+# Merge these blocks into an existing Authelia stack. This example intentionally
+# preserves Authelia's TLS-required notifier default because reset/verification
+# messages are security-sensitive. The relay certificate must name
+# smtp.example.com and chain to a root Authelia trusts.
+services:
+  postfix-m365-relay:
+    environment:
+      MAIL_INBOUND_AUTH: ip
+      MAIL_INBOUND_TLS: may
+      MAIL_INBOUND_TLS_CERT: /etc/letsencrypt/live/smtp.example.com/fullchain.pem
+      MAIL_INBOUND_TLS_KEY: /etc/letsencrypt/live/smtp.example.com/privkey.pem
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    networks:
+      mail-relay:
+        aliases: [postfix-m365-relay]
+
+  authelia:
+    # Keep the image, configuration, secrets, storage, and existing networks
+    # from your normal Authelia deployment; these are the mail-specific fields.
+    image: docker.io/authelia/authelia:latest
+    environment:
+      AUTHELIA_NOTIFIER_SMTP_ADDRESS: submission://postfix-m365-relay:2525
+      AUTHELIA_NOTIFIER_SMTP_SENDER: Authelia <authelia@relay.example.local>
+      AUTHELIA_NOTIFIER_SMTP_STARTUP_CHECK_ADDRESS: operator@example.com
+      AUTHELIA_NOTIFIER_SMTP_TLS_SERVER_NAME: smtp.example.com
+    networks:
+      - authelia-internal
+      - mail-relay
+
+networks:
+  authelia-internal:
+    internal: true
+  mail-relay:

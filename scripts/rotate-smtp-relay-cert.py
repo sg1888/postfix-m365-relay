@@ -255,7 +255,10 @@ class Rotation:
 
 
 def days_remaining(cert) -> int:
-    not_after = cert.not_valid_after_utc
+    try:
+        not_after = cert.not_valid_after_utc
+    except AttributeError:  # cryptography < 42 (e.g. Ubuntu 24.04 ships 41.x)
+        not_after = cert.not_valid_after.replace(tzinfo=datetime.timezone.utc)
     return (not_after - datetime.datetime.now(datetime.timezone.utc)).days
 
 

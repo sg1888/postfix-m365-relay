@@ -191,7 +191,13 @@ if docker exec "$container" timeout 5 bash -c "$health_command"; then
   exit 1
 fi
 docker exec "$container" mv "$daemon_directory/smtpd.health-test-disabled" "$daemon_directory/smtpd"
-for _ in {1..10}; do
+# TODO(revisit): smtpd recovery latency after the wedge is variable and not yet
+# fully understood. On the AlmaLinux postfix it lands ~10s; on the Ubuntu postfix
+# (same 3.8.x) it has been observed anywhere from ~3s to ~15s. The mechanism
+# (postfix master throttle after a signal-killed / failed-exec service) needs a
+# proper investigation. Window bumped 10 -> 15 to cover the observed range; if it
+# still flakes, do the deep dive rather than widening further.
+for _ in {1..15}; do
   docker exec "$container" timeout 5 bash -c "$health_command" && break
   sleep 1
 done

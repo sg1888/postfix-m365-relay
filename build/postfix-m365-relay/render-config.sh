@@ -35,6 +35,13 @@ MAIL_UPSTREAM_HOST=${MAIL_UPSTREAM_HOST:-smtp.office365.com}
 MAIL_UPSTREAM_PORT=${MAIL_UPSTREAM_PORT:-587}
 MAIL_UPSTREAM_TLS_SECURITY_LEVEL=${MAIL_UPSTREAM_TLS_SECURITY_LEVEL:-secure}
 MAIL_SENDER_MODE=${MAIL_SENDER_MODE:-collapse}
+# Envelope-From admission. Named senders are optional; with none configured the
+# relay accepts any envelope sender from an already-authorized client (inbound
+# auth/mynetworks still gate WHO may connect) and collapses it to the licensed
+# mailbox. Set `on` to reject any envelope From not equal to MAIL_SEND_MAILBOX or
+# a configured MAIL_SENDER_* address -- a stricter posture that reintroduces
+# per-application registration.
+MAIL_SENDER_ALLOWLIST=${MAIL_SENDER_ALLOWLIST:-off}
 MAIL_INBOUND_AUTH=${MAIL_INBOUND_AUTH:-ip}
 MAIL_RELAY_MAX_SIZE=${MAIL_RELAY_MAX_SIZE:-3m}
 MAIL_RELAY_RATE_LIMIT=${MAIL_RELAY_RATE_LIMIT:-200}
@@ -47,6 +54,7 @@ MAIL_SENDER_NAME_FALLBACK=${MAIL_SENDER_NAME_FALLBACK:-the relay}
 TOKEN_FILE=${MAIL_TOKEN_FILE:-/run/mail-relay/relay.json}
 
 case "$MAIL_SENDER_MODE" in collapse|passthrough) ;; *) fail "MAIL_SENDER_MODE must be collapse or passthrough" ;; esac
+case "$MAIL_SENDER_ALLOWLIST" in on|off) ;; *) fail "MAIL_SENDER_ALLOWLIST must be on or off" ;; esac
 case "$MAIL_UPSTREAM_TLS_SECURITY_LEVEL" in secure|encrypt) ;; *) fail "MAIL_UPSTREAM_TLS_SECURITY_LEVEL must be secure or encrypt" ;; esac
 case "$MAIL_INBOUND_AUTH" in off|ip|smtp-auth|ip-or-auth|ip-and-auth) ;; *) fail "invalid MAIL_INBOUND_AUTH: $MAIL_INBOUND_AUTH" ;; esac
 case "${MAIL_INBOUND_TLS:-}" in ''|off|may|require) ;; *) fail "MAIL_INBOUND_TLS must be off, may, or require" ;; esac
@@ -78,7 +86,8 @@ esac
 # by a boot test after an early implementation accidentally treated it as an
 # address named MODE.
 mapfile -t sender_keys < <(compgen -A variable | sed -n '/^MAIL_SENDER_[A-Z0-9_]*$/p' | \
-  sed '/^MAIL_SENDER_NAME_/d; /^MAIL_SENDER_MODE$/d' | sed 's/^MAIL_SENDER_//' | sort)
+  sed '/^MAIL_SENDER_NAME_/d; /^MAIL_SENDER_MODE$/d; /^MAIL_SENDER_ALLOWLIST$/d' | \
+  sed 's/^MAIL_SENDER_//' | sort)
 configured=()
 for key in "${sender_keys[@]}"; do
   address_var=MAIL_SENDER_${key}
@@ -90,7 +99,11 @@ for key in "${sender_keys[@]}"; do
   case "$name" in *$'\n'*|*$'\r'*) fail "$name_var must not contain a newline" ;; esac
   configured+=("$key")
 done
-(( ${#configured[@]} > 0 )) || fail "set at least one MAIL_SENDER_* address"
+# Named senders are optional. With none configured the relay still works: every
+# message collapses to MAIL_SEND_MAILBOX and keeps the app-supplied display name.
+if (( ${#configured[@]} == 0 )) && [[ $MAIL_SENDER_ALLOWLIST == on ]]; then
+  log 'note: MAIL_SENDER_ALLOWLIST=on with no MAIL_SENDER_* set; only MAIL_SEND_MAILBOX may send'
+fi
 
 passthrough=()
 # Passthrough is an allowlist, never a global bypass. Listed aliases retain
@@ -105,8 +118,16 @@ if [[ $MAIL_SENDER_MODE == passthrough && -n ${MAIL_PASSTHROUGH_SENDERS:-} ]]; t
   done
 fi
 
-first_var=MAIL_SENDER_${configured[0]}
-internal_domain=${!first_var#*@}
+# The internal domain seeds the Reply-To/Sender header-stripping rules that hide
+# a configured application's identity. With no senders configured there is no
+# such identity to hide, so fall back to the mailbox domain purely to keep the
+# variable defined; those strip rules are omitted below when no senders exist.
+if (( ${#configured[@]} > 0 )); then
+  first_var=MAIL_SENDER_${configured[0]}
+  internal_domain=${!first_var#*@}
+else
+  internal_domain=${MAIL_SEND_MAILBOX#*@}
+fi
 internal_domain_re=$(regex_escape "$internal_domain")
 
 {
@@ -137,8 +158,13 @@ internal_domain_re=$(regex_escape "$internal_domain")
     printf '/^From:([[:space:]]*|.*<)%s>?[[:space:]]*$/ REPLACE From: "%s" <%s>\n' \
       "$(regex_escape "${!address_var}")" "$safe_name" "$MAIL_SEND_MAILBOX"
   done
-  printf '/^Reply-To:.*%s/ IGNORE\n' "$internal_domain_re"
-  printf '/^Sender:.*%s/ IGNORE\n' "$internal_domain_re"
+  # These strip an internal application's Reply-To/Sender identity. They apply
+  # only when named senders exist; with none configured there is no internal
+  # domain to hide and stripping the mailbox's own domain would be wrong.
+  if (( ${#configured[@]} > 0 )); then
+    printf '/^Reply-To:.*%s/ IGNORE\n' "$internal_domain_re"
+    printf '/^Sender:.*%s/ IGNORE\n' "$internal_domain_re"
+  fi
   printf '/^From:[[:space:]]*(.*)<[^>]*>[[:space:]]*$/ REPLACE From: $1<%s>\n' "$MAIL_SEND_MAILBOX"
   safe_fallback=$(display_name_escape "$MAIL_SENDER_NAME_FALLBACK")
   printf '/^From:[[:space:]]*[^<>[:space:]]+@[^<>[:space:]]+[[:space:]]*$/ REPLACE From: "%s" <%s>\n' \
@@ -235,7 +261,14 @@ for key in "${managed_keys[@]}"; do postconf -X "$key" 2>/dev/null || true; done
   echo "smtpd_client_restrictions = $client_restrictions"
   echo "smtpd_relay_restrictions = $relay_restrictions"
   echo "smtpd_recipient_restrictions = $relay_restrictions"
-  echo 'smtpd_sender_restrictions = check_sender_access texthash:/etc/postfix/sender_access, reject'
+  # Envelope-From admission. Default (allowlist off) accepts any sender from an
+  # already-authorized client and lets sender_canonical collapse it to the
+  # mailbox. `on` restricts senders to sender_access (mailbox + MAIL_SENDER_*).
+  if [[ $MAIL_SENDER_ALLOWLIST == on ]]; then
+    echo 'smtpd_sender_restrictions = check_sender_access texthash:/etc/postfix/sender_access, reject'
+  else
+    echo 'smtpd_sender_restrictions = permit'
+  fi
   echo 'sender_canonical_maps = regexp:/etc/postfix/sender_canonical'
   echo 'sender_canonical_classes = envelope_sender'
   echo 'smtp_header_checks = regexp:/etc/postfix/header_checks'
@@ -275,4 +308,4 @@ for key in "${managed_keys[@]}"; do postconf -X "$key" 2>/dev/null || true; done
 } >> /etc/postfix/main.cf
 
 postfix check
-log "rendered ${#configured[@]} sender(s), sender-mode=$MAIL_SENDER_MODE, inbound-auth=$MAIL_INBOUND_AUTH, inbound-tls=$MAIL_INBOUND_TLS"
+log "rendered ${#configured[@]} sender(s), sender-mode=$MAIL_SENDER_MODE, sender-allowlist=$MAIL_SENDER_ALLOWLIST, inbound-auth=$MAIL_INBOUND_AUTH, inbound-tls=$MAIL_INBOUND_TLS"

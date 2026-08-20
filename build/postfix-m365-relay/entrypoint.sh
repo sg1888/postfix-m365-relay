@@ -23,11 +23,6 @@ allowed_config_name() {
   [[ $1 == MAIL_* || $1 == POSTFIX_* || $1 == TZ || $1 == RELAY_PORT ]]
 }
 
-is_sender_value_name() {
-  [[ $1 == MAIL_SENDER_* && $1 != MAIL_SENDER_MODE && \
-     $1 != MAIL_SENDER_NAME_FALLBACK && $1 != MAIL_SENDER_NAME_* ]]
-}
-
 variable_is_set() {
   # `[[ -v name ]]` would be concise but the repository's fast static checks
   # intentionally run on older Bash as well as the AlmaLinux runtime. `declare
@@ -39,10 +34,12 @@ variable_is_set() {
 configuration_is_complete() {
   # This is only the setup-mode readiness check; render-config.sh remains the
   # authoritative validator. Parse enough data to know when a user has filled
-  # the three required identifiers and at least one sender, without exporting
-  # partial values into PID 1. A later `exec` starts from the original Docker
-  # environment and loads the completed file cleanly.
-  local line name value required sender_found=no
+  # the three required Microsoft identifiers, without exporting partial values
+  # into PID 1. A later `exec` starts from the original Docker environment and
+  # loads the completed file cleanly. Named senders (MAIL_SENDER_*) are
+  # deliberately NOT required: with none set the relay collapses every message
+  # to MAIL_SEND_MAILBOX and preserves the display name the sending app supplied.
+  local line name value required
   declare -A candidate=()
   if [[ -r $CONFIG_FILE ]]; then
     while IFS= read -r line || [[ -n $line ]]; do
@@ -59,12 +56,6 @@ configuration_is_complete() {
     value=${candidate[$required]:-}
     [[ -n $value && $value != replace_me ]] || return 1
   done
-  for name in "${!candidate[@]}"; do
-    if is_sender_value_name "$name" && [[ -n ${candidate[$name]} ]]; then
-      sender_found=yes; break
-    fi
-  done
-  [[ $sender_found == yes ]]
 }
 
 load_config_file() {
@@ -111,7 +102,7 @@ if ! configuration_is_complete; then
     chown "$config_owner" "$CONFIG_FILE" "$config_dir/secrets"
     log "created first-run configuration at $CONFIG_FILE"
   fi
-  log "SETUP REQUIRED: edit $CONFIG_FILE; waiting for tenant ID, client ID, mailbox, and one MAIL_SENDER_*"
+  log "SETUP REQUIRED: edit $CONFIG_FILE; waiting for tenant ID, client ID, and mailbox (named senders are optional)"
   trap 'exit 0' TERM INT
   while ! configuration_is_complete; do sleep 2 & wait $!; done
   log 'configuration now has the required values; restarting bootstrap validation'
@@ -227,6 +218,54 @@ else
   export MAIL_UPSTREAM_CA_FILE_EFFECTIVE=$system_ca
 fi
 
+# The generated OAuth certificate's PUBLIC half must reach a human exactly once,
+# to seed the Entra app registration (the bootstrap "one-way door": until one
+# cert is trusted there, the relay cannot sign the proof that would let it roll
+# its own keys). After that first upload the relay rotates itself via Graph and
+# never needs the operator again. Export the public certificate as a clearly
+# named file in the host-editable /config directory so it can be retrieved
+# without `docker logs`, and remove it automatically once Microsoft accepts it
+# (proven by a successful token mint). The canonical cert never leaves the state
+# volume; only this pasteable public copy lives in /config, and only until used.
+CONFIG_DIR=${CONFIG_FILE%/*}
+[[ $CONFIG_DIR != "$CONFIG_FILE" ]] || CONFIG_DIR=.
+BOOTSTRAP_CERT_EXPORT=$CONFIG_DIR/microsoft365-app-public-cert.pem
+BOOTSTRAP_THUMBPRINT_EXPORT=$CONFIG_DIR/microsoft365-app-cert-thumbprint.txt
+
+publish_bootstrap_cert() {
+  local cert=$1 thumbprint=$2 owner
+  if [[ -d $CONFIG_DIR && -w $CONFIG_DIR ]]; then
+    install -m 0644 "$cert" "$BOOTSTRAP_CERT_EXPORT"
+    printf '%s\n' "$thumbprint" > "$BOOTSTRAP_THUMBPRINT_EXPORT"
+    chmod 0644 "$BOOTSTRAP_THUMBPRINT_EXPORT"
+    # Match the config directory's numeric owner so the administrator who
+    # launched the stack can read and delete the export without sudo, exactly as
+    # first-run does for the config file itself.
+    owner=$(stat -c '%u:%g' "$CONFIG_DIR" 2>/dev/null || true)
+    [[ -z ${owner:-} ]] || chown "$owner" "$BOOTSTRAP_CERT_EXPORT" "$BOOTSTRAP_THUMBPRINT_EXPORT" 2>/dev/null || true
+    log 'ACTION REQUIRED: upload this PUBLIC certificate to your Microsoft 365 (Entra) app registration, then the relay starts sending:'
+    log "  file:       $BOOTSTRAP_CERT_EXPORT"
+    log "  thumbprint: $thumbprint"
+    log 'Mail is queued until Entra accepts it. This file is removed automatically once accepted.'
+  else
+    # No writable /config mount (advanced, env-only deployments): the log is the
+    # only delivery channel, so print the PEM as a fallback.
+    log 'ACTION REQUIRED: upload the following PUBLIC certificate to your Microsoft 365 (Entra) app registration.'
+    log "Certificate SHA-1 thumbprint: $thumbprint"
+    sed 's/^/PUBLIC-CERTIFICATE: /' "$cert"
+    log 'The relay remains running and queues mail until Entra accepts this certificate.'
+  fi
+}
+
+remove_bootstrap_cert() {
+  # Called once a token mint proves Microsoft trusts the live certificate. Only
+  # the pasteable copy is removed; the canonical cert stays in the state volume.
+  local removed=no
+  [[ ! -e $BOOTSTRAP_CERT_EXPORT ]] || { rm -f "$BOOTSTRAP_CERT_EXPORT"; removed=yes; }
+  [[ ! -e $BOOTSTRAP_THUMBPRINT_EXPORT ]] || { rm -f "$BOOTSTRAP_THUMBPRINT_EXPORT"; removed=yes; }
+  [[ $removed == no ]] || log "Microsoft 365 accepted the certificate; removed the bootstrap export from $CONFIG_DIR."
+}
+
 oauth_key=$STATE_DIR/secrets/mail_relay_client_key.pem
 oauth_cert=$STATE_DIR/secrets/mail_relay_client_cert.pem
 # A mounted pair is an import source, not the permanent live path. Copy it only
@@ -251,10 +290,7 @@ if [[ ! -s $oauth_key || ! -s $oauth_cert ]]; then
     --key-path "$oauth_key" --cert-path "$oauth_cert")
   chown postfix:postfix "$oauth_key" "$oauth_cert"
   chmod 0600 "$oauth_key"; chmod 0644 "$oauth_cert"
-  log 'ACTION REQUIRED: upload the following PUBLIC certificate to the TEST Entra app registration.'
-  log "Certificate SHA-1 thumbprint: $thumbprint"
-  sed 's/^/PUBLIC-CERTIFICATE: /' "$oauth_cert"
-  log 'The relay remains running and queues mail until Entra accepts this certificate.'
+  publish_bootstrap_cert "$oauth_cert" "$thumbprint"
 fi
 validate_pair OAuth "$oauth_key" "$oauth_cert"
 # App-only OAuth identity is deliberately RSA-4096. Rejecting a weaker or
@@ -366,8 +402,18 @@ token_file=${MAIL_TOKEN_FILE:-$RUN_DIR/relay.json}
 # durably queueing new mail is safer than making the whole relay unavailable.
 if /usr/local/libexec/mail-relay/refresh-smtp-token.py --min-remaining 1800; then
   log 'startup token check completed before Postfix activation'
+  # A minted token proves Entra now trusts the live certificate, so the one-time
+  # bootstrap export in /config has served its purpose and can be cleaned up.
+  remove_bootstrap_cert
 else
   log 'startup token mint failed; starting Postfix in queue-first mode while the supervised loop retries'
+  # Not yet accepted by Microsoft. If a generated certificate exists but its
+  # pasteable copy is missing (e.g. a redeploy before the first upload, or a lost
+  # export), re-expose it so the operator can still complete the bootstrap.
+  if [[ -d $CONFIG_DIR && -w $CONFIG_DIR && -s $oauth_cert && ! -e $BOOTSTRAP_CERT_EXPORT ]]; then
+    existing_thumbprint=$(openssl x509 -in "$oauth_cert" -noout -fingerprint -sha1 2>/dev/null | sed 's/.*=//; s/://g')
+    publish_bootstrap_cert "$oauth_cert" "${existing_thumbprint:-unavailable}"
+  fi
 fi
 [[ -s $token_file ]] || log "token is not present yet; Postfix will queue mail while the token loop retries"
 # exec makes the Bash supervisor the real PID 1, which is required for signal

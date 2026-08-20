@@ -100,6 +100,15 @@ if ! configuration_is_complete; then
       fail "configuration is incomplete and $config_dir is not writable; mount ./config:/config"
     [[ -r $CONFIG_TEMPLATE ]] || fail "image configuration template is absent: $CONFIG_TEMPLATE"
     install -m 0600 "$CONFIG_TEMPLATE" "$CONFIG_FILE"
+    # A bind-mounted host directory is normally owned by the administrator who
+    # launched Compose. `install` runs as container root, which otherwise leaves
+    # the first-run file root-owned and prevents that administrator from editing
+    # the template without an extra sudo/chown step. Preserve the directory's
+    # numeric owner for both the config and its future device-secret directory.
+    # Named volumes remain root-owned, which is appropriate for their default
+    # Docker-managed posture.
+    config_owner=$(stat -c '%u:%g' "$config_dir")
+    chown "$config_owner" "$CONFIG_FILE" "$config_dir/secrets"
     log "created first-run configuration at $CONFIG_FILE"
   fi
   log "SETUP REQUIRED: edit $CONFIG_FILE; waiting for tenant ID, client ID, mailbox, and one MAIL_SENDER_*"

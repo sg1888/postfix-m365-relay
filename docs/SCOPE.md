@@ -32,9 +32,10 @@ licensing caveats, exact PowerShell workflow, and positive/negative proof.
 
 | Platform | Status |
 |---|---|
-| `linux/amd64`, x86-64-v3 | supported by the normal image |
-| `linux/amd64/v2` | supported by a separate `-x86-64-v2` tag |
-| `linux/arm64` with a 64-bit OS | supported by the normal image |
+| `linux/amd64`, any level (incl. default-CPU VMs) | default `latest` / `ubuntu` (Ubuntu) |
+| `linux/amd64`, x86-64-v3 | also `alma-v3` |
+| `linux/amd64/v2` | `alma-v2` |
+| `linux/arm64` with a 64-bit OS | default `latest` / `ubuntu`, and `alma-v3` |
 | 32-bit ARM or x86 | unsupported in v1 |
 | Raspberry Pi 3 with 32-bit Raspberry Pi OS | unsupported until a 64-bit OS is installed |
 

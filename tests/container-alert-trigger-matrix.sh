@@ -43,6 +43,34 @@ docker run -d --name "$relay" --network "$network" --network-alias relay \
 for _ in {1..40}; do docker exec "$relay" bash -c 'exec 3<>/dev/tcp/127.0.0.1/2525' >/dev/null 2>&1 && break; sleep 1; done
 docker exec "$relay" bash -c 'exec 3<>/dev/tcp/127.0.0.1/2525' >/dev/null 2>&1
 
+# The production supervisor intentionally starts its token and verification
+# loops immediately, and both send a token-health "recovered" on every healthy
+# pass. This test invokes the verifier itself to make one fault at a time, so
+# pause those background groups before injecting faults. Without that
+# isolation a healthy background recovery can land between the deliberate open
+# and the duplicate-suppression assertion, producing a CI timing failure that
+# says nothing about the alert implementation.
+#
+# Order matters: wait for the first background verify pass to finish before
+# stopping, so both loops are provably inside their 300-second sleep and
+# cannot be frozen mid-pass while holding the alert state lock.
+for _ in {1..30}; do
+  docker logs "$relay" 2>&1 | grep -q 'verify-relay:' && break; sleep 1
+done
+docker logs "$relay" 2>&1 | grep -q 'verify-relay:'
+for role in token verify; do
+  role_pid=$(docker exec "$relay" cat "/run/mail-relay/supervisor/$role.pid")
+  docker exec "$relay" kill -STOP -- "-$role_pid"
+done
+# Fail fast with a clear message if a frozen process somehow still holds the
+# alert lock; otherwise every later alert call would hang until the job times
+# out with no explanation.
+docker exec "$relay" python3 -c '
+import fcntl, signal
+signal.alarm(10)
+fcntl.flock(open("/var/lib/mail-relay/alerts/.lock", "a+"), fcntl.LOCK_EX)
+' || { echo "alert state lock is wedged after pausing supervisor loops" >&2; exit 1; }
+
 # Keep the known-good fixture token explicit on every exec.  `docker exec`
 # inherits the container's original environment, but the entrypoint may load a
 # generated config between checks; making this path explicit prevents a later
@@ -55,18 +83,20 @@ wait_event() {
   echo "timed out waiting for event=$1 status=$2" >&2
   return 1
 }
-event_lines() { grep -c '"event": "'$1'"' "$fixture/webhooks.jsonl" || true; }
+# Recovery notifications are expected, so duplicate suppression is measured
+# only among open incidents for the requested event.
+open_event_lines() { EVENT=$1 FILE=$fixture/webhooks.jsonl python3 -c 'import json,os; print(sum(d.get("event")==os.environ["EVENT"] and d.get("status")=="open" for d in map(json.loads, open(os.environ["FILE"]))))'; }
 
 # Token, OAuth certificate, CA age, queue, SASL, inbound TLS, push monitor,
 # and listener categories. Each row opens, suppresses duplicate, then clears.
 verify MAIL_TOKEN_FILE=/run/secrets/missing
-wait_event token-health open; verify MAIL_TOKEN_FILE=/run/secrets/missing; sleep 1; [[ $(event_lines token-health) == 1 ]]
+wait_event token-health open; verify MAIL_TOKEN_FILE=/run/secrets/missing; sleep 1; [[ $(open_event_lines token-health) == 1 ]]
 verify; wait_event token-health recovered
 verify MAIL_RELAY_CERT_FILE=/run/secrets/missing-cert
-wait_event oauth-certificate-health open; verify MAIL_RELAY_CERT_FILE=/run/secrets/missing-cert; sleep 1; [[ $(event_lines oauth-certificate-health) == 1 ]]
+wait_event oauth-certificate-health open; verify MAIL_RELAY_CERT_FILE=/run/secrets/missing-cert; sleep 1; [[ $(open_event_lines oauth-certificate-health) == 1 ]]
 verify; wait_event oauth-certificate-health recovered
 verify MAIL_CA_BUNDLE_MAX_AGE_DAYS=0
-wait_event ca-bundle-age open; verify MAIL_CA_BUNDLE_MAX_AGE_DAYS=0; sleep 1; [[ $(event_lines ca-bundle-age) == 1 ]]
+wait_event ca-bundle-age open; verify MAIL_CA_BUNDLE_MAX_AGE_DAYS=0; sleep 1; [[ $(open_event_lines ca-bundle-age) == 1 ]]
 verify MAIL_CA_BUNDLE_MAX_AGE_DAYS=99999; wait_event ca-bundle-age recovered
 docker exec "$relay" touch /var/spool/postfix/deferred/alert-trigger-test
 verify MAIL_QUEUE_WARN_DEPTH=0; wait_event queue-depth-health open

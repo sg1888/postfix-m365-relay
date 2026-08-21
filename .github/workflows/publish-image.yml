@@ -9,11 +9,19 @@ env:
   IMAGE_NAME: postfix-m365-relay
 
 jobs:
+  # Release gate: run the exact same suite as CI (host unit tests + both-variant
+  # container suites + Trivy) before any image is built or pushed. Every build job
+  # depends on this (directly or transitively via build-ubuntu), so a v* tag
+  # cannot publish images unless the suite passes.
+  suite:
+    uses: ./.github/workflows/suite.yml
+
   # Default image. Ubuntu is the x86-64 v1 baseline, so one manifest runs on every
   # amd64 CPU (including default-CPU VMs) plus arm64 — no micro-arch tag split. It
   # owns the unsuffixed tags: latest, {{version}}, {{major}}.{{minor}}, {{major}},
   # and the moving `ubuntu` alias.
   build-ubuntu:
+    needs: suite
     runs-on: ubuntu-latest
     permissions:
       contents: read

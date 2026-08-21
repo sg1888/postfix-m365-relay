@@ -60,6 +60,7 @@ grep -Eq "application-rbac" docs/MICROSOFT-SETUP.md
 # indentation damage without downloading another Python dependency.
 ruby -e 'require "yaml"; ARGV.each { |path| YAML.load_file(path) }' \
   .github/workflows/publish-image.yml .github/workflows/test.yml \
+  .github/workflows/suite.yml \
   compose.yaml examples/compose.yaml examples/compose-with-apps.yaml \
   examples/compose.device-relay.yaml examples/compose.letsencrypt.yaml \
   examples/authelia.compose.yaml examples/alertmanager.yml \

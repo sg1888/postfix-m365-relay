@@ -248,7 +248,7 @@ policy for TLS-1.0 hardware—use IP policy instead.
 | `MAIL_TOKEN_LOOP_SECONDS` | `300` |
 | `MAIL_ROTATION_LOOP_SECONDS` | `86400` |
 | `MAIL_VERIFY_LOOP_SECONDS` | `3600` |
-| `MAIL_VERIFY_SEND` | `yes` when an admin email exists |
+| `MAIL_VERIFY_SEND` | `no` -- test-only end-to-end probe; see below |
 | `MAIL_CA_BUNDLE_MAX_AGE_DAYS` | `90` |
 | `MAIL_TOKEN_ALERT_AFTER` | `3` consecutive failures |
 | `MAIL_QUEUE_WARN_DEPTH` | `25` deferred messages |
@@ -259,6 +259,39 @@ policy for TLS-1.0 hardware—use IP policy instead.
 Loop timing overrides are for isolated tests. Rotation stages, adds, waits for
 replication, proves token and delivery, swaps atomically, re-mints immediately,
 and retires the old key on the next run.
+
+### Bringing your own OAuth certificate
+
+By default the container generates its own RSA-4096 OAuth client certificate on
+first boot and rotates it automatically. To supply your own instead, mount the
+private key and certificate and point these at them:
+
+| Variable | Meaning |
+|---|---|
+| `MAIL_RELAY_CLIENT_KEY_FILE` | Path to your OAuth client **private key** (PEM). Must be RSA-4096. |
+| `MAIL_RELAY_CLIENT_CERT_FILE` | Path to the matching **certificate** (PEM). Its public half is what you upload to the app registration. |
+
+They are copied into the state volume once, on first boot, and thereafter the
+relay owns and rotates that copy. Provide both or neither.
+
+### `MAIL_VERIFY_SEND` — end-to-end delivery probe (test only, off by default)
+
+`MAIL_VERIFY_SEND` defaults to `no`. **It is a testing tool, not a production
+feature, and the relay never emails the administrator on a schedule.** When set
+to `yes`, every verify cycle (`MAIL_VERIFY_LOOP_SECONDS`, default hourly) sends
+one real message *through the relay* to `MAIL_ADMIN_EMAIL` and then confirms in
+Postfix's log that it reached `status=sent`. That is the only check that proves
+the entire path — local submission, XOAUTH2 `AUTH` to Microsoft, and upstream
+acceptance — actually delivers; no internal check can prove delivery without
+sending mail. The cost is an email to the admin on every cycle, which is why it
+must never be left on.
+
+Use it deliberately during **bring-up or troubleshooting**: set
+`MAIL_VERIFY_SEND=yes` (optionally with a longer `MAIL_VERIFY_LOOP_SECONDS`, or
+run `verify-relay.sh` once by hand), watch the probe arrive in the admin inbox,
+then set it back to `no`. All other verify checks — token freshness, OAuth
+certificate, rotation, queue depth, and SASL failure counts — run on every cycle
+regardless of this setting and never send mail.
 
 ### What can expire during unattended operation
 
@@ -277,7 +310,7 @@ and retires the old key on the next run.
   Conditional Access, SMTP AUTH, webhook creds, disk, and time can all change
   independently. No container runs zero-maintenance for years. Rebuild/pull
   patched images, restart onto the reviewed digest, keep state/spool volumes,
-  and monitor hourly probes and rotation alerts.
+  and monitor rotation alerts and health checks.
 
 The verifier opens one durable incident when the CA bundle exceeds 90 days;
 repeated checks update it without duplicates. A tested image replacement clears
@@ -297,6 +330,17 @@ bodies.
 Email and webhook delivery are independent. Failed deliveries persist and retry
 with bounded backoff. Configure both when possible: email uses the same Postfix/OAuth
 route you're watching, while webhooks can still report that route's failure.
+
+### Push health monitors
+
+`MAIL_RELAY_PUSH_BASE` turns on push-style health reporting (for example an
+Uptime Kuma push monitor). Set it to the monitor's base URL and mount one token
+file per category you want reported — `/run/secrets/push_token_relay`,
+`push_token_token`, `push_token_certificate`, `push_token_rotation`. Each verify
+cycle the relay calls `BASE/<token>?status=up|down&msg=...` for every category
+that has a token. Only the status word and a character-filtered summary are sent;
+never a bearer token, mail content, or raw log line. Leave `MAIL_RELAY_PUSH_BASE`
+empty to disable.
 
 ### Corporate TLS inspection
 

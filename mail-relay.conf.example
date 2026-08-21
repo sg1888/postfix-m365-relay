@@ -1,136 +1,165 @@
-#### This file is copied to /config/mail-relay.conf on first startup.
-#### Fill in the required values there. Environment variables are optional overrides;
-#### secret bytes must remain in files and are never accepted as variable values.
+# =============================================================================
+# postfix-m365-relay configuration
+#
+# This file is copied to /config/mail-relay.conf the first time the container
+# starts. Fill in the values below and restart. Anything not listed here keeps a
+# sensible default; every available setting is documented in docs/CONFIGURATION.md.
+#
+# Secrets (private keys, passwords) are never written in this file -- they are
+# mounted as separate files and referenced by their path.
+# =============================================================================
 
-#### Required: three Microsoft identifiers. Named senders are OPTIONAL.
+
+# -----------------------------------------------------------------------------
+# 1. REQUIRED -- Microsoft 365 identity
+#
+# These values connect the relay to your tenant. The relay will not send mail
+# until the first three are filled in. See docs/MICROSOFT-SETUP.md for how to
+# create the app registration and the mailbox.
+# -----------------------------------------------------------------------------
+
+# Your Microsoft 365 tenant (directory) ID.
 MAIL_RELAY_TENANT=
+
+# The Application (client) ID of the app registration the relay signs in as.
 MAIL_RELAY_CLIENT_ID=
 
-# Recorded for the one-time Exchange setup only. The container does not read it.
-MAIL_RELAY_ENTERPRISE_APP_OBJECT_ID=
-
-# REQUIRED: A mailbox used only for relay output. Claims-less. (Shared mailbox recommended)
-# Exchange App RBAC needs no API permission, FullAccess, or separate mailbox
-# license within Microsoft's shared-mailbox limits. See docs/MICROSOFT-SETUP.md.
+# The mailbox all outgoing mail is sent from. Use a dedicated, unlicensed shared
+# mailbox; every message the relay sends goes out as this address.
 MAIL_SEND_MAILBOX=
 
-#### Recommended: Email Address that will receive alerts, verification probes, and certificate-rotation proof mail.
+# The Object ID of the enterprise application (in Entra: Enterprise applications
+# > your app > Object ID). It is used only once, by powershell/setup-exchange.ps1,
+# to grant the mailbox permission -- the running container never reads it. It is
+# recorded here so re-running the setup script reuses the same identity. Getting
+# this wrong is a common cause of "535 Authentication unsuccessful".
+MAIL_RELAY_ENTERPRISE_APP_OBJECT_ID=
+
+
+# -----------------------------------------------------------------------------
+# 2. Alerts -- where the relay tells you something is wrong
+#
+# The relay only contacts you about real problems (a failed token, an expiring
+# certificate). It never sends routine "all is well" mail.
+# -----------------------------------------------------------------------------
+
+# Email address that receives alerts and certificate-rotation proof messages.
+# Strongly recommended -- without it, failures are visible only in the logs.
 MAIL_ADMIN_EMAIL=
 
-# Named senders are OPTIONAL. Leave them all unset and every message is sent as
-# MAIL_SEND_MAILBOX while keeping the display name the sending application
-# supplied (falling back to MAIL_SENDER_NAME_FALLBACK when it supplies none).
-# Define a MAIL_SENDER_<APP> only to pin a specific From display name for that
-# application, and optionally MAIL_SENDER_NAME_<APP> to set the name it shows.
+# Optional second alert channel: a URL that receives a JSON message for each
+# problem. Worth setting because an email outage cannot announce itself by email.
+# Treat the URL as a secret. Leave blank to disable.
+MAIL_ALERT_WEBHOOK=
+
+
+# -----------------------------------------------------------------------------
+# 3. Sender identity -- how the "From" address and name appear
+#
+# By default every message is rewritten to come from MAIL_SEND_MAILBOX, keeping
+# whatever display name the sending application used. These settings adjust that.
+# -----------------------------------------------------------------------------
+
+# How the From address is handled:
+#   collapse (default) -- rewrite every message to come from MAIL_SEND_MAILBOX.
+#   passthrough        -- let specific pre-approved addresses keep their own From
+#                         address (listed below); everything else still collapses.
+MAIL_SENDER_MODE=collapse
+
+# Display name used when a sending application does not supply one of its own.
+MAIL_SENDER_NAME_FALLBACK=Example notifications
+
+# Who may appear as the sender:
+#   off (default) -- accept mail from any connected client and rewrite it.
+#   on            -- reject any From address that is not MAIL_SEND_MAILBOX or one
+#                   you named below. (Who may CONNECT is set in section 4.)
+MAIL_SENDER_ALLOWLIST=off
+
+# Passthrough mode only: the addresses allowed to keep their own From address.
+# Comma- or space-separated. Ignored in collapse mode.
+MAIL_PASSTHROUGH_SENDERS=
+
+# Optional: pin a fixed From address and display name for one application. Repeat
+# the pair for each app, replacing APP with any label you like. See the examples/
+# folder for ready-made Grafana, Gitea, Alertmanager, and Authelia entries.
 # MAIL_SENDER_APP=app@relay.example.local
 # MAIL_SENDER_NAME_APP=Example application
 
-# Additional senders used by examples/compose-with-apps.yaml and the Authelia
-# wiring example. Uncomment only the applications you actually deploy.
-# MAIL_SENDER_GRAFANA=grafana@relay.example.local
-# MAIL_SENDER_NAME_GRAFANA=Grafana alerts
-# MAIL_SENDER_GITEA=gitea@relay.example.local
-# MAIL_SENDER_NAME_GITEA=Gitea notifications
-# MAIL_SENDER_ALERTMANAGER=alertmanager@relay.example.local
-# MAIL_SENDER_NAME_ALERTMANAGER=Prometheus Alertmanager
-# MAIL_SENDER_AUTHELIA=authelia@relay.example.local
-# MAIL_SENDER_NAME_AUTHELIA=Authelia
 
-#### Sender behavior: collapse (default) or passthrough. Passthrough remains gated
-#### on the live alias gate in docs/TESTING.md; unlisted addresses always collapse.
-MAIL_SENDER_MODE=collapse
-MAIL_PASSTHROUGH_SENDERS=
-MAIL_SENDER_NAME_FALLBACK=Example notifications
+# -----------------------------------------------------------------------------
+# 4. Inbound access -- who is allowed to connect to the relay
+#
+# Controls which clients may hand mail to the relay. The default trusts only the
+# local Docker network, which is right for apps sharing a compose network.
+# -----------------------------------------------------------------------------
 
-#### Envelope-From admission. off (default): accept any envelope sender from an
-#### already-authorized client and collapse it to MAIL_SEND_MAILBOX -- no need to
-#### register each application. on: reject any envelope From that is not
-#### MAIL_SEND_MAILBOX or a configured MAIL_SENDER_* address. WHO may connect is
-#### always controlled separately by MAIL_INBOUND_AUTH/MAIL_TRUSTED_NETWORKS, so
-#### off is not an open relay.
-MAIL_SENDER_ALLOWLIST=off
-
-#### Relay config.
-MAIL_AUTH_MODE=microsoft-cert
-RELAY_PORT=2525
-MAIL_UPSTREAM_HOST=smtp.office365.com
-MAIL_UPSTREAM_PORT=587
-
-#### Relay's internal domain. Sets Postfix mydomain AND the SASL realm for device
-#### logins. Internal only: it need not be real/DNS-resolvable and need not match
-#### your Microsoft 365 domain; prefer an FQDN (contains a dot). Device clients
-#### still log in with their bare username -- the realm is appended server-side --
-#### and sasldb is rebuilt from MAIL_SMTPD_USERS every boot, so changing this is
-#### safe.
-MAIL_RELAY_DOMAIN=relay.example.local
-
-#### Relay's hostname. Sets Postfix myhostname (the EHLO name and Received-header
-#### host) AND the subject CN of the self-signed inbound TLS certificate. Internal
-#### only -- not your Microsoft 365 domain, need not resolve in DNS; prefer an FQDN
-#### (contains a dot). Microsoft's upstream does not check it. If a device client
-#### does strict TLS hostname verification, set it to the exact name/address
-#### clients use to reach the relay; opportunistic-TLS clients ignore it.
-MAIL_RELAY_HOSTNAME=postfix-m365-relay.relay.example.local
-
-#### Verify security for upstream certs.
-#### secure verifies Microsoft's certificate; encrypt is compatibility-only.
-MAIL_UPSTREAM_TLS_SECURITY_LEVEL=secure
-
-#### Corporate TLS inspection only: mount the public inspection root, never its key.
-# MAIL_UPSTREAM_CA_EXTRA_FILE=/run/secrets/corporate_smtp_ca
-
-#### Deferred messages and deferred bounces are retained for this long.
-MAIL_QUEUE_LIFETIME=12h
-MAIL_RELAY_MAX_SIZE=3m
-MAIL_RELAY_RATE_LIMIT=200
-
-#### IANA timezone used by Postfix. If omitted, /etc/localtime is used; see docs.
-TZ=UTC
-
-#### Warn when the immutable image's CA trust package is older than this.
-MAIL_CA_BUNDLE_MAX_AGE_DAYS=90
-
-#### OAuth client certificate lifecycle. The container derives the thumbprint.
-MAIL_CERT_VALIDITY_DAYS=730
-
-#### The number of days after which the certificate will be renewed.  Blank means half of MAX_CERT_VALIDITY_DAYS.
-MAIL_CERT_RENEW_AT_DAYS=
-
-#### The number of days to wait before deleting expired or old certificates.
-MAIL_CERT_GRACE_DAYS=7
-
-#### Optional BYO first certificate; both are copied into the state volume at boot.
-# MAIL_RELAY_CLIENT_KEY_FILE=/run/secrets/oauth_client_key
-# MAIL_RELAY_CLIENT_CERT_FILE=/run/secrets/oauth_client_cert
-
-#### Published-device posture only.
-#### Options are: off | ip | smtp-auth | ip-or-auth | ip-and-auth
+# How connecting clients are authorized:
+#   off         -- no external clients.
+#   ip          -- trust clients on the local/allowed network (default).
+#   smtp-auth   -- require a username and password.
+#   ip-or-auth  -- trusted network OR a valid login.
+#   ip-and-auth -- trusted network AND a valid login.
 MAIL_INBOUND_AUTH=ip
 
-#### Blank derives from auth policy; explicit values: off | may | require
+# Require encryption on inbound connections: off | may | require. Leave blank to
+# pick a safe default from MAIL_INBOUND_AUTH (encryption is required whenever a
+# password is involved).
 MAIL_INBOUND_TLS=
+
+# Extra IP addresses or CIDR ranges allowed to connect, in addition to the
+# auto-detected Docker network. Comma- or space-separated. Blank = local only.
 MAIL_TRUSTED_NETWORKS=
 
-#### Required by auth-inclusive policies. One user:password per line.
+# File of "username:password" lines, one per line. Needed only when
+# MAIL_INBOUND_AUTH requires a login. Mounted as a secret, not stored here.
 MAIL_SMTPD_USERS_FILE=/config/secrets/smtpd_users
 
-#### Optional BYO server certificate. If omitted while TLS is on, a separate
-#### self-signed certificate is generated. These paths are never Graph-rotated.
-MAIL_INBOUND_TLS_VALIDITY_DAYS=3650
-MAIL_INBOUND_TLS_RENEW_AT_DAYS=365
-# MAIL_INBOUND_TLS_CERT=/run/secrets/inbound_tls_cert
-# MAIL_INBOUND_TLS_KEY=/run/secrets/inbound_tls_key
-# For a CA-issued certificate, CERT should be a fullchain PEM: leaf first,
-# followed by intermediate issuers. Certbot's fullchain.pem is ready to use.
 
-#### Optional independent JSON incident channel. Configure this as well as the
-#### admin email when possible: an OAuth/mail outage can prevent email alerts.
-#### Bodies contain redacted evidence, UTC/local timestamps, a stable reference,
-#### duration, causes, actions, and the runbook link; never credentials.
-MAIL_ALERT_WEBHOOK=
-# MAIL_RUNBOOK_URL=https://github.com/sg1888/postfix-m365-relay/blob/main/docs/RUNBOOK.md
-MAIL_RELAY_PUSH_BASE=
+# -----------------------------------------------------------------------------
+# 5. Network and host identity
+#
+# The port the relay listens on and the names it uses. The defaults are
+# internal-only and safe to leave unchanged unless a client checks TLS names.
+# -----------------------------------------------------------------------------
 
-#### Any POSTFIX_name becomes `name = value`, except security-sensitive settings
-#### force-asserted by the managed block. Example:
+# Port the relay listens on inside the container.
+RELAY_PORT=2525
+
+# Internal domain name. Sets Postfix's mydomain and the login realm. Internal
+# only -- it need not be real, resolvable, or match your Microsoft 365 domain.
+# Prefer a name containing a dot.
+MAIL_RELAY_DOMAIN=relay.example.local
+
+# Hostname the relay announces (its EHLO name, Received header, and the name on
+# its self-signed inbound TLS certificate). Internal only. Set it to the exact
+# address clients use ONLY if a client verifies the TLS hostname strictly.
+MAIL_RELAY_HOSTNAME=postfix-m365-relay.relay.example.local
+
+# Timezone for log timestamps. If unset, the server's /etc/localtime is used.
+TZ=UTC
+
+
+# -----------------------------------------------------------------------------
+# 6. Testing
+# -----------------------------------------------------------------------------
+
+# Leave "no" in production. When "yes", the relay sends a real test email to
+# MAIL_ADMIN_EMAIL on every health cycle (hourly) to prove mail actually reaches
+# Microsoft. Useful during first setup -- but it means one email per hour, so
+# turn it back off when done. All other health checks run regardless.
+MAIL_VERIFY_SEND=no
+
+
+# -----------------------------------------------------------------------------
+# 7. Advanced
+#
+# Rarely needed, so kept out of this file. Upstream host, message size and rate
+# limits, queue lifetime, certificate lifetimes, corporate TLS inspection,
+# bring-your-own certificates, and push monitors are all documented in
+# docs/CONFIGURATION.md.
+# -----------------------------------------------------------------------------
+
+# Pass any raw Postfix main.cf setting through by prefixing its name with
+# POSTFIX_. Security-sensitive settings are always enforced by the relay and
+# cannot be overridden this way. Example:
 # POSTFIX_smtp_dns_support_level=dnssec

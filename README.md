@@ -238,17 +238,27 @@ its own from then on. The private key never leaves the `mail-relay-state` volume
 ## Test that it actually works
 
 Before you wire up a single app, prove the relay reaches Microsoft. One command
-runs the same audit the container runs on its own every hour — and it sends a
-real test email end-to-end, then confirms Microsoft **accepted** it, not just
-that localhost took the handoff:
+runs the same audit the container runs on every verify cycle — listener, token,
+certificate, rotation, queue, and SASL checks — all internal, no email sent:
 
 ```bash
 docker exec postfix-m365-relay /usr/local/libexec/mail-relay/verify-relay.sh
 ```
 
-A healthy run ends with `healthy (0 warning(s))` and drops a
-"postfix-m365-relay hourly verification" message into your `MAIL_ADMIN_EMAIL`
-inbox. Go look — that inbox arrival is your proof mail is really flowing.
+To also prove **end-to-end delivery** — a real message travelling localhost
+submit → XOAUTH2 `AUTH` → Microsoft **accept**, confirmed by its arrival in your
+inbox — opt in for a one-off run:
+
+```bash
+docker exec -e MAIL_VERIFY_SEND=yes postfix-m365-relay /usr/local/libexec/mail-relay/verify-relay.sh
+```
+
+A healthy run ends with `healthy (0 warning(s))`. With the delivery probe
+enabled it also drops a "postfix-m365-relay end-to-end verification" message into
+your `MAIL_ADMIN_EMAIL` inbox — that arrival is your proof mail is really
+flowing. This is a **test tool**: the relay never emails the admin on a schedule
+(`MAIL_VERIFY_SEND` defaults to `no`; see docs/CONFIGURATION.md). Turn it on
+while validating, then turn it back off.
 
 If something's wrong, it doesn't just say "failed." It names **which** part broke
 and why, so you know exactly what to fix:
@@ -266,13 +276,6 @@ registration yet, so no token can be issued. Upload
 `./mail-relay/microsoft365-app-public-cert.pem`, wait for propagation, and re-run.
 The command exits `0` when healthy and `1` when any category failed, so you can
 drop it into a script or CI check.
-
-Just want to sanity-check configuration without sending a live email? Skip the
-probe:
-
-```bash
-docker exec -e MAIL_VERIFY_SEND=no postfix-m365-relay /usr/local/libexec/mail-relay/verify-relay.sh
-```
 
 ## Wiring an application to the relay
 
@@ -598,8 +601,9 @@ Bash is PID 1 and supervises Postfix plus three restartable loops:
 - **token refresh** every five minutes, minting only when under 30 minutes remain;
 - **certificate rotation** — the OAuth app certificate and, independently, the
   inbound STARTTLS certificate — checked daily;
-- **health verification** hourly: listener, token, certificates, queue, SASL
-  failures, and optional end-to-end delivery.
+- **health verification** hourly: listener, token, certificates, queue, and SASL
+  failures — all internal. The end-to-end delivery probe (a real email to the
+  admin) is off by default and test-only; enable with `MAIL_VERIFY_SEND=yes`.
 
 ### Where things are stored, and why
 

@@ -39,6 +39,13 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
+          # latest=false: only the explicit `type=raw,value=latest` (Ubuntu job)
+          # may claim the `latest` tag. Without this, metadata-action's default
+          # latest=auto adds `latest` to EVERY job on a version tag, so all three
+          # build jobs race for `latest` and the last writer (Alma) wins -- which
+          # is how `latest` silently became the Alma image. The Ubuntu job still
+          # gets latest via its explicit raw tag; the Alma jobs must never claim it.
+          flavor: latest=false
           images: |
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
@@ -117,6 +124,13 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
+          # latest=false: only the explicit `type=raw,value=latest` (Ubuntu job)
+          # may claim the `latest` tag. Without this, metadata-action's default
+          # latest=auto adds `latest` to EVERY job on a version tag, so all three
+          # build jobs race for `latest` and the last writer (Alma) wins -- which
+          # is how `latest` silently became the Alma image. The Ubuntu job still
+          # gets latest via its explicit raw tag; the Alma jobs must never claim it.
+          flavor: latest=false
           images: |
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
@@ -177,6 +191,13 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
+          # latest=false: only the explicit `type=raw,value=latest` (Ubuntu job)
+          # may claim the `latest` tag. Without this, metadata-action's default
+          # latest=auto adds `latest` to EVERY job on a version tag, so all three
+          # build jobs race for `latest` and the last writer (Alma) wins -- which
+          # is how `latest` silently became the Alma image. The Ubuntu job still
+          # gets latest via its explicit raw tag; the Alma jobs must never claim it.
+          flavor: latest=false
           images: |
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}

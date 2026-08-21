@@ -255,6 +255,11 @@ policy for TLS-1.0 hardware—use IP policy instead.
 | `MAIL_SASL_FAILURE_WARN_COUNT` | `10` recent failures |
 | `MAIL_ALERT_WEBHOOK` | empty; optional independent JSON incident receiver |
 | `MAIL_RUNBOOK_URL` | public project runbook URL used in notifications |
+| `MAIL_INSTANCE_ID` | auto-generated UUID kept in the state volume; pins this instance's certificate ownership |
+| `MAIL_CERT_RECOVERY_ENABLED` | `yes` — automatic standby-certificate recovery |
+| `MAIL_CERT_RECOVERY_AFTER_SECONDS` | `21600` (6h) sustained fault before a standby is generated |
+| `MAIL_CERT_RECOVERY_FAULT_STREAK` | `6` consecutive definitive-fault checks required |
+| `MAIL_RESET_SENTINEL` | `/config/reset-oauth-cert` — drop this file to force a reset |
 
 Loop timing overrides are for isolated tests. Rotation stages, adds, waits for
 replication, proves token and delivery, swaps atomically, re-mints immediately,
@@ -273,6 +278,61 @@ private key and certificate and point these at them:
 
 They are copied into the state volume once, on first boot, and thereafter the
 relay owns and rotates that copy. Provide both or neither.
+
+### Sharing one app registration across instances
+
+Several relays may share one Entra **app registration**, provided **each instance
+keeps its own certificate and its own state volume**. Never copy one private key
+to more than one instance: rotations are independent, so one instance would
+schedule the shared key for removal and break the other a week later.
+
+Each instance generates a stable `MAIL_INSTANCE_ID` (a UUID in its state volume)
+and stamps it into every certificate it registers. `relay-admin keys` labels each
+credential from that stamp:
+
+- `LIVE` / `RETIRING` / `SUPERSEDED` — this instance's own; only a `SUPERSEDED`
+  one is offered for removal.
+- `FOREIGN` — another instance's certificate. Never removed, and `remove-key`
+  refuses to delete it through `relay-admin`.
+- `UNMONITORED` — uploaded by hand (ownership unprovable); left alone.
+
+Remove another instance's certificate only from the instance that owns it. A
+recreated container that keeps its state volume keeps its id and certificate;
+only wiping the volume creates a new identity.
+
+### Recovering a deleted or expired live certificate (automatic)
+
+If the live certificate is deleted at Entra or expires, the relay cannot
+re-register itself (Graph `addKey` needs a still-trusted certificate to sign its
+proof). Recovery is automatic, non-destructive, and human-in-the-loop:
+
+1. The five-minute loop tells a **definitive** certificate fault
+   (expired/revoked/removed) from a transient network or Entra outage, and from a
+   missing Exchange role. Only a definitive fault counts.
+2. Once it persists past `MAIL_CERT_RECOVERY_AFTER_SECONDS` **and**
+   `MAIL_CERT_RECOVERY_FAULT_STREAK` checks, the relay stages **one** standby
+   certificate and repeats an "upload required" banner. Mail keeps queueing; the
+   live certificate is untouched.
+3. Both certificates are then tested every loop, **old first**. If the original
+   works again (a transient outage cleared), the standby is discarded and nothing
+   is lost. If you upload the standby, it is adopted only after it proves it can
+   send, the old key is retired, and the banner clears.
+
+Set `MAIL_CERT_RECOVERY_ENABLED=no` to keep the diagnosis and repeated notice but
+skip the standby step.
+
+### Resetting the OAuth certificate (manual)
+
+To start over — a fresh certificate you then upload — without editing files inside
+the container, use either:
+
+- `docker exec <container> relay-admin reset-oauth-cert`, or
+- drop the sentinel `MAIL_RESET_SENTINEL` (default `/config/reset-oauth-cert`)
+  into the host `/config` mount; the loop consumes it within one cycle.
+
+Both regenerate the live certificate, keep the previous pair as `.previous`, and
+raise the repeated upload banner. The old app-registration key is left in place
+(shown `SUPERSEDED` by `relay-admin keys`) for you to remove when ready.
 
 ### `MAIL_VERIFY_SEND` — end-to-end delivery probe (test only, off by default)
 
@@ -298,8 +358,10 @@ regardless of this setting and never send mail.
 - The OAuth access token is short-lived. The five-minute loop re-mints it when
   fewer than 30 minutes remain—not a certificate, never renewed on a fixed schedule.
 - The OAuth app certificate defaults to 730 days and attempts staged rotation
-  halfway through. If it expires or external policy blocks Graph `addKey`,
-  recovery needs an Entra admin—alerts are non-optional.
+  halfway through. If the live certificate is deleted or expires, self-rotation
+  is impossible (Graph `addKey` needs a trusted certificate to sign its proof);
+  the relay then automatically stages a standby and asks for an upload — see
+  *Recovering a deleted or expired live certificate* above. Alerts stay essential.
 - The inbound STARTTLS certificate follows the independent 3,650/365 lifecycle.
   BYO certificates are never overwritten; their CA/ACME owner must replace and
   restart. The verifier and daily rotation alert inside the renewal window.

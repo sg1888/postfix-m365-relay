@@ -14,7 +14,18 @@ run_token_loop() {
   # Consecutive failures are counted so one transient network error is logged
   # while a sustained outage becomes an alert.
   local failures=0 token_result
+  local sentinel=${MAIL_RESET_SENTINEL:-/config/reset-oauth-cert}
   while :; do
+    # Operator-triggered reset without an interactive shell: a sentinel file the
+    # administrator drops into the host-editable /config mount. Consume it FIRST
+    # so a leftover file can never cause a reset loop, then regenerate the live
+    # certificate. rotate-smtp-relay-cert.py --reset raises the upload notice.
+    if [[ -f $sentinel ]]; then
+      log "operator reset sentinel found ($sentinel); regenerating the OAuth certificate"
+      rm -f "$sentinel" 2>/dev/null || true
+      /usr/local/libexec/mail-relay/rotate-smtp-relay-cert.py --reset --yes || \
+        log 'sentinel-triggered reset failed'
+    fi
     # Capture the concise helper diagnostic so safe Entra error codes, Trace ID,
     # Correlation ID, and timestamp can accompany the incident. The helper never
     # prints the assertion or access token, and alert-event applies an additional
@@ -26,6 +37,9 @@ run_token_loop() {
       # when this process-local failure counter necessarily starts again at 0.
       /usr/local/libexec/mail-relay/alert.sh recover token-health \
         'Token check succeeded and the token file is current' || true
+      # A minted token proves the live certificate is trusted, so any outstanding
+      # certificate-upload notice has been satisfied; clear it (no-op when none).
+      /usr/local/libexec/mail-relay/cert-action.sh clear || true
       failures=0
     else
       failures=$((failures + 1))
@@ -35,7 +49,15 @@ run_token_loop() {
         /usr/local/libexec/mail-relay/alert.sh open error token-health \
           "Token refresh failed $failures consecutive times. Last safe diagnostic: ${token_result:-none}" || true
       fi
+      # Keep an outstanding certificate-upload notice visible between the
+      # verifier's hourly banners so it is not lost in a run of failure lines.
+      /usr/local/libexec/mail-relay/cert-action.sh pointer || true
     fi
+    # Non-destructive self-recovery. Cheap and a no-op while the live certificate
+    # is healthy (it short-circuits on a fresh token); only when a definitive,
+    # sustained certificate fault is detected does it stage a standby and ask for
+    # an upload, and it never disturbs the live certificate that might return.
+    /usr/local/libexec/mail-relay/rotate-smtp-relay-cert.py --recover || true
     sleep "${MAIL_TOKEN_LOOP_SECONDS:-300}" & wait $!
   done
 }

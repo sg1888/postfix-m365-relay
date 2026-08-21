@@ -101,7 +101,7 @@ grep -Eq '^[0-9A-F]{40}$' "$thumb_export"
 # first match and the closed pipe makes `docker logs` die of SIGPIPE, which
 # pipefail would otherwise turn into a spurious test failure.
 docker logs "$container" > "$fixture/bootstrap.log" 2>&1
-grep -q 'ACTION REQUIRED.*upload this PUBLIC certificate' "$fixture/bootstrap.log"
+grep -q 'ACTION REQUIRED.*upload the OAuth public certificate' "$fixture/bootstrap.log"
 grep -q 'microsoft365-app-public-cert.pem' "$fixture/bootstrap.log"
 # The private key never leaves the state volume; only the public copy is exported.
 docker exec "$container" test ! -e /config/microsoft365-app-private-key.pem

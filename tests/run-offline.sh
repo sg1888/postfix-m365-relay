@@ -31,6 +31,7 @@ tests=(
   container-alert-incidents.sh
   container-alert-trigger-matrix.sh
   container-oauth-rotation-alert.sh
+  container-oauth-reset.sh
   container-inbound-tls-rotation-alert.sh
   container-invalid-alias-alert.sh
   container-config-matrix.sh

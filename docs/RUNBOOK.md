@@ -58,8 +58,10 @@ call Graph `addKey`, wait for directory/token-service replication, send proof
 message, swap files atomically, re-mint immediately, record old key. Inbound-TLS
 path renews image-generated certs only; paths don't touch each other's keys.
 
-Verification runs hourly. With `MAIL_ADMIN_EMAIL`, submits end-to-end probe via
-loopback; otherwise local checks only.
+Verification runs hourly: internal checks only (token, certificate, rotation,
+queue, SASL), never sending mail. The end-to-end delivery probe is test-only and
+off by default; set `MAIL_VERIFY_SEND=yes` (with `MAIL_ADMIN_EMAIL`) to submit a
+real probe via loopback during bring-up, then set it back to `no`.
 
 ## Alerts and durable incidents
 

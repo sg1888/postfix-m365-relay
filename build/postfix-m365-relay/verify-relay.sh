@@ -155,12 +155,22 @@ if [[ -r $log_file ]]; then
   fi
 fi
 
-if [[ -n ${MAIL_ADMIN_EMAIL:-} && ${MAIL_VERIFY_SEND:-yes} == yes ]]; then
+# End-to-end delivery probe. OFF by default: when enabled it sends one real
+# email through the relay to MAIL_ADMIN_EMAIL every verify cycle
+# (MAIL_VERIFY_LOOP_SECONDS, default hourly), so leaving it on would mail the
+# administrator on a fixed interval forever -- unacceptable in production. It
+# exists purely as a TEST: a bring-up or troubleshooting tool that proves the
+# whole path (local submit -> XOAUTH2 AUTH -> Microsoft accept) actually
+# delivers, which no internal check can confirm. The other verify checks (token
+# freshness, certificate, rotation, queue, SASL failures) always run regardless
+# and never send mail. Turn this on deliberately (MAIL_VERIFY_SEND=yes) while
+# validating a deployment, watch for the probe to arrive, then turn it back off.
+if [[ -n ${MAIL_ADMIN_EMAIL:-} && ${MAIL_VERIFY_SEND:-no} == yes ]]; then
   # Acceptance by localhost is not delivery. Correlate a unique Message-ID with
   # Postfix's log and require a sent result before claiming end-to-end success.
   sender=$MAIL_SEND_MAILBOX
   message_id="verify-$(date +%s)-$$@${MAIL_RELAY_DOMAIN:-relay.example.local}"
-  if submit_probe "$sender" 'postfix-m365-relay hourly verification' "$message_id"
+  if submit_probe "$sender" 'postfix-m365-relay end-to-end verification (test probe)' "$message_id"
   then
     if wait_for_sent_message "$message_id" "${MAIL_VERIFY_DELIVERY_WAIT_SECONDS:-15}"; then category_message[relay]="end-to-end probe accepted and its delivery was sent"
     else warn 'end-to-end probe was accepted but delivery was not observed yet'; fi

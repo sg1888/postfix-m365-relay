@@ -53,7 +53,9 @@ Run every suite against the candidate image:
 ./tests/run-offline.sh postfix-m365-relay:test
 ```
 
-The runner stops at each named suite; failure pinpoints the problem. CI runs them as separate named steps for visibility.
+By default the container suites run in parallel, capped at `min(4, cores)` — each suite isolates its own Docker containers, volumes, and networks and binds no host ports, so concurrent runs never collide. A failing run prints a PASS/FAIL summary and dumps the full log of each failed suite. Set `TEST_JOBS=1` for serial execution with live per-suite output when debugging a single failure; raise `TEST_JOBS` on a many-core host. CI runs the suites as separate named steps for per-suite visibility.
+
+Run whole images sequentially (one variant at a time) even though each variant's suites run in parallel — the suite resource names are shared across images, so two images testing at once would collide.
 
 These cover invalid configuration, malformed secrets, sender-name escaping, collapse/passthrough maps, all five inbound policies, trusted/untrusted networks, right/wrong passwords, authorized/unauthorized senders, TLS-before-AUTH, credential revocation, certificate handling, supervisor behavior, wedged healthcheck, read-only operation, and deferred messages surviving queue ID replacement through recovery. The inbound fullchain test verifies Postfix serves the intermediate, validates hostname, and loads atomically replaced key/fullchain pairs.
 

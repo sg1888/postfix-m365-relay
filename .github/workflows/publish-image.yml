@@ -65,9 +65,15 @@ jobs:
           sbom: true
       - name: Assert runtime packages (amd64 native, arm64 emulated)
         run: |
-          image="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
+          # Reference the multi-arch manifest by TAG, not by @digest. The runner's
+          # classic image store rejects `docker run --platform <native> ref@<index
+          # digest>` with "cannot overwrite digest" because the selected per-arch
+          # sub-manifest digest differs from the index digest. A tag lets docker
+          # select each platform's sub-manifest cleanly; --pull always keeps it
+          # honest. The build's index digest is still what gets attested below.
+          image="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
           for platform in linux/amd64 linux/arm64; do
-            docker run --rm --platform "$platform" --entrypoint /bin/bash "$image" -c \
+            docker run --rm --pull always --platform "$platform" --entrypoint /bin/bash "$image" -c \
               "test \"\$(dpkg-query -W -f='\${Version}' sasl-xoauth2 | cut -d- -f1)\" = 0.27 && \
                python3 -c 'import cryptography' && command -v saslpasswd2"
           done

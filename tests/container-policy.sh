@@ -115,6 +115,7 @@ docker run -d --name "$container" --network none \
   -e MAIL_SMTPD_USERS_FILE=/run/secrets/smtpd_users \
   -e POSTFIX_smtp_dns_support_level=disabled \
   -e POSTFIX_smtp_tls_security_level=encrypt \
+  -e POSTFIX_service_throttle_time=2s \
   -e MAIL_VERIFY_SEND=no -e MAIL_TOKEN_ALERT_AFTER=99 \
   -e MAIL_LOOP_RESTART_BACKOFF=1 \
   -e MAIL_TOKEN_LOOP_SECONDS=300 -e MAIL_ROTATION_LOOP_SECONDS=300 -e MAIL_VERIFY_LOOP_SECONDS=300 \
@@ -137,7 +138,14 @@ done
 [[ $(docker exec "$container" postconf -h smtpd_sasl_auth_enable) == yes ]]
 [[ $(docker exec "$container" postconf -h smtp_dns_support_level) == disabled ]]
 [[ $(docker exec "$container" postconf -h smtp_tls_security_level) == secure ]]
-[[ $(docker exec "$container" postconf -h smtp_tls_CAfile) == /etc/pki/tls/certs/ca-bundle.crt ]]
+# The system trust bundle lives at a distro-specific path (RHEL/AlmaLinux use
+# /etc/pki, Debian/Ubuntu use /etc/ssl). Detect it from the running image the
+# same way the entrypoint does so this assertion is not tied to one distro; it
+# still proves the managed block overrode the hostile /tmp/hostile-ca above.
+system_ca=$(docker exec "$container" sh -c \
+  'if [ -s /etc/pki/tls/certs/ca-bundle.crt ]; then echo /etc/pki/tls/certs/ca-bundle.crt; \
+   elif [ -s /etc/ssl/certs/ca-certificates.crt ]; then echo /etc/ssl/certs/ca-certificates.crt; fi')
+[[ $(docker exec "$container" postconf -h smtp_tls_CAfile) == "$system_ca" ]]
 [[ $(docker exec "$container" postconf -h mynetworks) != *0.0.0.0/0* ]]
 [[ $(docker exec "$container" stat -c '%a %U:%G' /run/mail-relay/sasldb2) == '600 postfix:postfix' ]]
 docker exec "$container" relay-users list > "$fixture/relay-users.log"
@@ -192,16 +200,45 @@ if docker exec "$container" timeout 5 bash -c "$health_command"; then
   exit 1
 fi
 docker exec "$container" mv "$daemon_directory/smtpd.health-test-disabled" "$daemon_directory/smtpd"
-# TODO(revisit): smtpd recovery latency after the wedge is variable and not yet
-# fully understood. On the AlmaLinux postfix it lands ~10s; on the Ubuntu postfix
-# (same 3.8.x) it has been observed anywhere from ~3s to ~15s. The mechanism
-# (postfix master throttle after a signal-killed / failed-exec service) needs a
-# proper investigation. Window bumped 10 -> 15 to cover the observed range; if it
-# still flakes, do the deep dive rather than widening further.
-for _ in {1..15}; do
-  docker exec "$container" timeout 5 bash -c "$health_command" && break
+# Recovery latency is governed by the postfix master throttle, and it is the
+# same on every distro. Moving smtpd aside and then connecting forces the master
+# to exec a missing binary; it logs "bad command startup -- throttling" and
+# refuses to respawn smtpd for service_throttle_time (postfix default 60s).
+# Restoring the binary does NOT cancel that timer (nor does "postfix reload"), so
+# a default container stays wedged for the full ~60s. The historical Alma-vs-
+# Ubuntu "difference" was not a distro behaviour at all: the old loop counted
+# ITERATIONS (~6s each) as a proxy for elapsed time, so 10 iterations straddled
+# the fixed 60s boundary -- clearing it on one runner and just missing it on the
+# other. The 60s throttle itself is identical on both.
+#
+# The 60s is real postfix behaviour, but the moved-binary fault that triggers it
+# here is an artificial test artifact, never a production condition (in prod the
+# smtpd binary never vanishes; this relay's supervisor also exits the container
+# on MASTER death and lets the orchestrator restart it, rather than clearing a
+# throttle). So the container above pins service_throttle_time=2s: the synthetic
+# wedge clears in a few seconds instead of burning ~60s of CI wall time. This is
+# a test-only override on a disposable container; the shipping default stays 60s.
+# It does not weaken anything -- smtpd is still genuinely unstartable during the
+# wedge (the "accepted a wedged Postfix" guard above is unaffected), and the
+# health probe after the loop must still observe a real 220.
+#
+# The loop records how long recovery took and prints it on success and give-up
+# (dumping the master log on give-up), so CI still captures the real latency.
+recovery_start=$SECONDS
+recovered=no
+for recovery_attempt in {1..15}; do
+  if docker exec "$container" timeout 5 bash -c "$health_command"; then recovered=yes; break; fi
   sleep 1
 done
+recovery_elapsed=$((SECONDS - recovery_start))
+if [[ $recovered == yes ]]; then
+  printf 'smtpd recovery: healthy after ~%ss (%s attempt(s), window 15)\n' \
+    "$recovery_elapsed" "$recovery_attempt"
+else
+  printf 'smtpd recovery: STILL WEDGED after ~%ss (%s attempts); dumping master log\n' \
+    "$recovery_elapsed" "$recovery_attempt" >&2
+  docker exec "$container" tail -n 40 /var/log/mail-relay/postfix.log >&2 2>/dev/null || true
+fi
 docker exec "$container" timeout 5 bash -c "$health_command"
 echo 'ok health command passes normally and fails while smtpd is wedged'
 

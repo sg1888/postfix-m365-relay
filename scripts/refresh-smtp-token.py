@@ -224,6 +224,8 @@ def main() -> int:
         help="Skip the mint if the existing token still has at least this many seconds left",
     )
     parser.add_argument("--quiet", action="store_true", help="Print nothing unless something fails")
+    parser.add_argument("--quiet-skip", action="store_true",
+                        help="Suppress only the 'still valid, not minting' line; still log real mints and failures")
     parser.add_argument("--no-chown", action="store_true",
                         help="Leave the token 0600 and owned by the caller, for testing")
     args = parser.parse_args()
@@ -250,7 +252,7 @@ def main() -> int:
             existing = json.loads(token_file.read_text())
             remaining = int(existing.get("expiry", 0)) - int(time.time())
             if remaining >= args.min_remaining:
-                if not args.quiet:
+                if not args.quiet and not args.quiet_skip:
                     print(f"existing token still valid for {remaining}s; not minting")
                 return 0
         except (ValueError, OSError):

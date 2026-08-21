@@ -31,10 +31,14 @@ make_pair() {
   chmod 0600 "$fixture/$stem.key"
   chmod 0644 "$fixture/$stem.crt"
 }
+# oauth pairs stay RSA-4096 on purpose: the boot guard now requires >= 2048, so
+# these legacy-strength keys must still import cleanly (the upgrade path). The
+# weak pair is below 2048 and must be refused.
 make_pair oauth-one 4096 'OAuth Import One'
 make_pair oauth-two 4096 'OAuth Import Two'
 make_pair inbound-one 2048 'Inbound TLS One'
 make_pair inbound-two 2048 'Inbound TLS Two'
+make_pair weak 1024 'Weak OAuth'
 
 common=(--network none
   -e MAIL_RELAY_TENANT=00000000-0000-0000-0000-000000000000
@@ -116,8 +120,8 @@ expect_pair_failure postfix-m365-relay-certificate-inbound-mismatch-state \
   'inbound TLS private key and certificate do not match' \
   oauth-one.key oauth-one.crt inbound-one.key inbound-two.crt
 expect_pair_failure postfix-m365-relay-certificate-weak-state \
-  'OAuth private key must be RSA-4096' \
-  inbound-one.key inbound-one.crt inbound-one.key inbound-one.crt
+  'OAuth private key must be RSA-2048 or stronger' \
+  weak.key weak.crt inbound-one.key inbound-one.crt
 
 docker rm -f "$container" >/dev/null 2>&1 || true
 echo 'ok certificate validation and persistence matrix'

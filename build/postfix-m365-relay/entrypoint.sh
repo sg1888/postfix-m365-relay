@@ -280,12 +280,12 @@ if [[ (! -s $oauth_key || ! -s $oauth_cert) && (-n ${MAIL_RELAY_CLIENT_KEY_FILE:
 fi
 # First boot deliberately creates a credential even without Microsoft access.
 # This lets an operator upload the public half while the private half never
-# leaves the state volume. RSA-4096 is the OAuth identity; do not confuse it
+# leaves the state volume. RSA-2048 is the OAuth identity; do not confuse it
 # with the separately managed RSA-2048 inbound server certificate below.
 if [[ ! -s $oauth_key || ! -s $oauth_cert ]]; then
-  log 'generating the first OAuth client certificate (RSA 4096)'
+  log 'generating the first OAuth client certificate (RSA 2048)'
   thumbprint=$(/usr/local/libexec/mail-relay/rotate-smtp-relay-cert.py \
-    --generate-only --key-bits 4096 --validity "${MAIL_CERT_VALIDITY_DAYS:-730}" \
+    --generate-only --key-bits 2048 --validity "${MAIL_CERT_VALIDITY_DAYS:-730}" \
     --subject "${MAIL_RELAY_CERT_SUBJECT:-postfix-m365-relay}" \
     --key-path "$oauth_key" --cert-path "$oauth_cert")
   chown postfix:postfix "$oauth_key" "$oauth_cert"
@@ -293,11 +293,13 @@ if [[ ! -s $oauth_key || ! -s $oauth_cert ]]; then
   publish_bootstrap_cert "$oauth_cert" "$thumbprint"
 fi
 validate_pair OAuth "$oauth_key" "$oauth_cert"
-# App-only OAuth identity is deliberately RSA-4096. Rejecting a weaker or
-# different BYO key keeps imported credentials equivalent to generated ones and
-# makes the security claim in documentation mechanically true.
-openssl pkey -in "$oauth_key" -pubout -text -noout 2>/dev/null | \
-  grep -q 'Public-Key: (4096 bit)' || fail 'OAuth private key must be RSA-4096'
+# App-only OAuth identity must be at least RSA-2048. Generated certificates use
+# 2048; a stronger BYO or legacy key (e.g. an existing 4096 credential) is still
+# accepted so an upgrade never rejects a credential already in the state volume.
+# Anything weaker than 2048 is refused.
+oauth_bits=$(openssl pkey -in "$oauth_key" -pubout -text -noout 2>/dev/null | \
+  sed -n 's/.*Public-Key: (\([0-9]*\) bit).*/\1/p')
+[[ ${oauth_bits:-0} -ge 2048 ]] || fail 'OAuth private key must be RSA-2048 or stronger'
 export MAIL_RELAY_KEY_FILE=$oauth_key MAIL_RELAY_CERT_FILE=$oauth_cert
 
 # Derive secure TLS defaults from the selected inbound trust model. In

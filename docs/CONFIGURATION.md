@@ -262,13 +262,13 @@ and retires the old key on the next run.
 
 ### Bringing your own OAuth certificate
 
-By default the container generates its own RSA-4096 OAuth client certificate on
+By default the container generates its own RSA-2048 OAuth client certificate on
 first boot and rotates it automatically. To supply your own instead, mount the
 private key and certificate and point these at them:
 
 | Variable | Meaning |
 |---|---|
-| `MAIL_RELAY_CLIENT_KEY_FILE` | Path to your OAuth client **private key** (PEM). Must be RSA-4096. |
+| `MAIL_RELAY_CLIENT_KEY_FILE` | Path to your OAuth client **private key** (PEM). Must be RSA-2048 or stronger. |
 | `MAIL_RELAY_CLIENT_CERT_FILE` | Path to the matching **certificate** (PEM). Its public half is what you upload to the app registration. |
 
 They are copied into the state volume once, on first boot, and thereafter the

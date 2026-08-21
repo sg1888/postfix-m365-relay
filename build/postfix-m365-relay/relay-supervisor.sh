@@ -19,7 +19,7 @@ run_token_loop() {
     # Correlation ID, and timestamp can accompany the incident. The helper never
     # prints the assertion or access token, and alert-event applies an additional
     # credential-shaped redaction pass before persistence or delivery.
-    if token_result=$(/usr/local/libexec/mail-relay/refresh-smtp-token.py --min-remaining 1800 2>&1); then
+    if token_result=$(/usr/local/libexec/mail-relay/refresh-smtp-token.py --min-remaining 1800 --quiet-skip 2>&1); then
       [[ -z $token_result ]] || printf '%s\n' "$token_result"
       # Recovery is harmless when no incident is open. Calling it on every
       # healthy pass also clears an incident that survived container restart,

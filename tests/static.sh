@@ -6,7 +6,9 @@
 set -euo pipefail
 
 repo_files() {
-  find "$@" -type f -print
+  # Exclude vendored third-party trees (e.g. bats-core): they are not our source
+  # to lint, and their docs/whitespace would trip the audits below.
+  find "$@" -type f ! -path '*/vendor/bats-core/*' -print
 }
 
 # Keep this runner compatible with Bash 3.2, which has arrays but not `mapfile`.

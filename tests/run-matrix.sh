@@ -10,18 +10,28 @@
 # attempt the emulated amd64 variants locally (build confirmation is useful even
 # when the emulated test run is unreliable).
 set -uo pipefail
+# The unified Dockerfile bind-mounts its build scripts, which requires BuildKit.
+export DOCKER_BUILDKIT=1
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/.." && pwd)"
 
+# Host-side shell unit tests are distro-independent -- run once, up front, as the
+# cheap fast gate before any image build.
+if ! "$here/bats-unit.sh"; then
+  echo "bats unit tests FAILED" >&2
+  exit 1
+fi
+
+# One Dockerfile, distro selected by the BASE_IMAGE build arg.
 # name | dockerfile | platform (empty = native) | extra build args
 variants=(
-  "ubuntu-native|build/postfix-m365-relay/Dockerfile.ubuntu||"
-  "alma-native|build/postfix-m365-relay/Dockerfile||"
+  "ubuntu-native|build/postfix-m365-relay/Dockerfile||--build-arg BASE_IMAGE=ubuntu:24.04"
+  "alma-native|build/postfix-m365-relay/Dockerfile||--build-arg BASE_IMAGE=almalinux:10"
 )
 if [[ ${ALL:-0} == 1 ]]; then
   variants+=(
-    "ubuntu-amd64|build/postfix-m365-relay/Dockerfile.ubuntu|linux/amd64|"
-    "alma-amd64|build/postfix-m365-relay/Dockerfile|linux/amd64|"
+    "ubuntu-amd64|build/postfix-m365-relay/Dockerfile|linux/amd64|--build-arg BASE_IMAGE=ubuntu:24.04"
+    "alma-amd64|build/postfix-m365-relay/Dockerfile|linux/amd64|--build-arg BASE_IMAGE=almalinux:10"
   )
 fi
 

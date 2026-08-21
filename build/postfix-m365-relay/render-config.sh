@@ -6,20 +6,13 @@ set -euo pipefail
 
 log() { printf '%s render-config: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 fail() { log "FATAL: $*" >&2; exit 1; }
-valid_email() { [[ $1 =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; }
-regex_escape() { sed 's/[][(){}.^$*+?|\\]/\\&/g' <<<"$1"; }
-display_name_escape() {
-  # There are two parsers after Bash: Postfix's regexp-map replacement parser,
-  # then the RFC 5322 quoted-string parser used by recipients. Escape for both
-  # in the order shown. An early test used `Price $5`; Postfix treated $5 as a
-  # missing capture group and skipped the rule. Doubling dollars is therefore
-  # a correctness requirement, not cosmetic quoting.
-  local value=$1
-  value=${value//\\/\\\\}  # RFC quoted-string: preserve a literal backslash.
-  value=${value//\"/\\\"}  # RFC quoted-string: preserve a literal quote.
-  value=${value//\$/\$\$}    # Postfix regexp maps: $$ emits one literal dollar.
-  printf '%s' "$value"
-}
+
+# Pure text helpers (valid_email, regex_escape, display_name_escape) live in a
+# sourced lib so they can be unit-tested in isolation (tests/unit/text.bats).
+# lib/ sits beside this script in both the repo and the image.
+_relay_lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib
+# shellcheck source=lib/text.sh
+. "$_relay_lib/text.sh"
 
 : "${MAIL_SEND_MAILBOX:?Set MAIL_SEND_MAILBOX}"
 : "${MAIL_RELAY_TENANT:?Set MAIL_RELAY_TENANT}"

@@ -90,6 +90,10 @@ jobs:
   # via the moving `alma-v3` tag and versioned `-alma-v3` tags. Never claims the
   # unsuffixed/latest tags.
   build-alma-v3:
+    # Gate on build-ubuntu: it owns latest/{{version}}/{{major}}.{{minor}}. If it
+    # fails, skip the Alma publishes too, so a release is all-or-nothing and never
+    # ships new alma-vN tags beside a stale latest.
+    needs: build-ubuntu
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -150,6 +154,8 @@ jobs:
   # altarch 10 base. amd64-only; opt-in via the moving `alma-v2` tag and versioned
   # `-alma-v2` tags. This replaces the old `-x86-64-v2` suffix tags.
   build-alma-v2:
+    # Gate on build-ubuntu for the same all-or-nothing reason as build-alma-v3.
+    needs: build-ubuntu
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -225,3 +231,27 @@ jobs:
           repository: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
           readme-filepath: docs/DOCKERHUB.md
           short-description: Self-contained Postfix app-only OAuth relay for Microsoft 365
+
+  # Guardrail against a silently-wrong latest. build-ubuntu writes both `latest`
+  # and `ubuntu` to the same digest, so after a successful release they must be
+  # equal. If a past build-ubuntu failure ever left `latest` stale (e.g. pointing
+  # at an old Alma image), the digests diverge and this job fails the run loudly
+  # instead of leaving latest quietly wrong. Only meaningful on a real version tag
+  # (the one that actually pushes the moving latest/ubuntu tags).
+  verify-latest:
+    needs: [build-ubuntu, build-alma-v3, build-alma-v2]
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: latest must equal the freshly published ubuntu image
+        run: |
+          img="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
+          latest=$(docker buildx imagetools inspect "$img:latest" --format '{{.Manifest.Digest}}')
+          ubuntu=$(docker buildx imagetools inspect "$img:ubuntu" --format '{{.Manifest.Digest}}')
+          echo "latest digest: $latest"
+          echo "ubuntu digest: $ubuntu"
+          if [ "$latest" != "$ubuntu" ]; then
+            echo "::error::latest ($latest) != ubuntu build ($ubuntu) -- latest is stale or wrong"
+            exit 1
+          fi
+          echo "ok: latest points at the ubuntu build"

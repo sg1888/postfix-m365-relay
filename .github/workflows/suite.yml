@@ -64,7 +64,9 @@ jobs:
       # unrelated work while a fixable one does. Relax severity/exit-code here if
       # this proves too aggressive.
       - name: Vulnerability scan (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        # Pinned to the audited v0.36.0 commit so a moved tag cannot slip in
+        # unreviewed action code.
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           image-ref: postfix-m365-relay:test
           format: table

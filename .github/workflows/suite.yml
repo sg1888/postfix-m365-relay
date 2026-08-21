@@ -1,0 +1,115 @@
+name: suite
+
+# Reusable test suite. Called by test.yml on every PR/push (so this definition is
+# continuously exercised) and by publish-image.yml as a release gate (the build
+# jobs there depend on it, so a v* tag cannot publish images unless this passes).
+on:
+  workflow_call:
+
+jobs:
+  # Host-side unit tests for the pure shell helpers (lib/text.sh). Container-free
+  # and distro-independent, so they run as a fast standalone job.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell unit tests (bats)
+        run: ./tests/bats-unit.sh
+
+  container:
+    runs-on: ubuntu-latest
+    # Both base images are gated on every change. The runner is native amd64, so
+    # this is where the Ubuntu image gets real x86-64 validation (local arm64
+    # Macs can only emulate amd64, under which the Rust cryptography extension
+    # segfaults). fail-fast: false so one variant's failure still reports the other.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: ubuntu
+            base: ubuntu:24.04
+          - variant: alma
+            base: almalinux:10
+    steps:
+      - uses: actions/checkout@v4
+
+      # Static checks run before package downloads so basic syntax failures are
+      # reported quickly and do not consume Buildx/QEMU time.
+      - name: Static audit
+        run: ./tests/static.sh
+      # YAML parsing catches indentation; Compose's own parser additionally
+      # validates service, mount, network, secret, and interpolation semantics.
+      - name: Validate Compose model
+        run: docker compose config --quiet
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build release image (${{ matrix.variant }})
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/postfix-m365-relay/Dockerfile
+          build-args: |
+            BASE_IMAGE=${{ matrix.base }}
+          platforms: linux/amd64
+          load: true
+          tags: postfix-m365-relay:test
+          cache-from: type=gha,scope=tests-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=tests-${{ matrix.variant }}
+          provenance: false
+
+      # Vulnerability scan of the freshly built image. ignore-unfixed keeps the
+      # gate actionable -- it fails only on CRITICAL/HIGH findings that actually
+      # have a fix available, so an unpatched upstream CVE does not block
+      # unrelated work while a fixable one does. Relax severity/exit-code here if
+      # this proves too aggressive.
+      - name: Vulnerability scan (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: postfix-m365-relay:test
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+
+      # These suites use only example.invalid identities and --network none for
+      # credential logic. They never contact Microsoft or a production relay.
+      - name: Offline Python credential tests
+        run: ./tests/python-unit.sh postfix-m365-relay:test
+      - name: Sender-name and regexp-map tests
+        run: ./tests/container-sender-names.sh postfix-m365-relay:test
+      - name: Optional-sender and sender-allowlist tests
+        run: ./tests/container-optional-sender.sh postfix-m365-relay:test
+      - name: Real Postfix-to-XOAUTH2 sink integration
+        run: ./tests/container-end-to-end.sh postfix-m365-relay:test
+      # This separate drill removes and recreates the relay around an actually
+      # deferred message. It guards the named spool volume contract that a
+      # normal happy-path protocol test cannot prove.
+      - name: Persistent spool replacement and recovery
+        run: ./tests/container-spool-recovery.sh postfix-m365-relay:test
+      - name: Durable alert incidents and independent channels
+        run: ./tests/container-alert-incidents.sh postfix-m365-relay:test
+      - name: Automatic alert trigger matrix
+        run: ./tests/container-alert-trigger-matrix.sh postfix-m365-relay:test
+      - name: OAuth rotation alert
+        run: ./tests/container-oauth-rotation-alert.sh postfix-m365-relay:test
+      - name: Managed inbound TLS rotation alert
+        run: ./tests/container-inbound-tls-rotation-alert.sh postfix-m365-relay:test
+      - name: Invalid passthrough alias alert
+        run: ./tests/container-invalid-alias-alert.sh postfix-m365-relay:test
+      - name: Outbound STARTTLS certificate matrix
+        run: ./tests/container-upstream-tls.sh postfix-m365-relay:test
+      - name: Configuration matrix
+        run: ./tests/container-config-matrix.sh postfix-m365-relay:test
+      - name: First-run persistent configuration
+        run: ./tests/container-first-run-config.sh postfix-m365-relay:test
+      - name: SASL user and Docker-secret lifecycle
+        run: ./tests/container-sasl-user-lifecycle.sh postfix-m365-relay:test
+      - name: Remote network policy truth tables
+        run: ./tests/container-network-policy.sh postfix-m365-relay:test
+      - name: Certificate import and separation matrix
+        run: ./tests/container-certificates.sh postfix-m365-relay:test
+      - name: Inbound fullchain and renewal handshake
+        run: ./tests/container-inbound-fullchain.sh postfix-m365-relay:test
+      - name: Security, supervisor, and read-only tests
+        run: ./tests/container-policy.sh postfix-m365-relay:test

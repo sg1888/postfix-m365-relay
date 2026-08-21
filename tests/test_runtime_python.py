@@ -458,5 +458,206 @@ class AlertIncidentTests(unittest.TestCase):
             webhook.assert_not_called()
 
 
+class ListKeysReportTests(unittest.TestCase):
+    """The `--list-keys` report classifies Microsoft's real keyCredentials
+    response into LIVE / RETIRING / ORPHAN and prints a removal hint per orphan.
+
+    The fixture at tests/fixtures/keycredentials.json is a redacted capture from a
+    live Entra tenant whose customKeyIdentifier encoding (uppercase hex, not the
+    base64 the Graph docs describe) is capture-verified. Treating that encoding
+    wrong once mislabelled the live certificate an orphan and invited its
+    deletion, so the report is exercised against the real shape here.
+    """
+
+    FIXTURE = json.loads((ROOT / "tests/fixtures/keycredentials.json").read_text())
+
+    def test_fixture_reflects_the_observed_graph_shape(self):
+        credential = self.FIXTURE["value"][0]["keyCredentials"][0]
+        for field in ("customKeyIdentifier", "displayName", "keyId",
+                      "endDateTime", "type", "usage"):
+            self.assertIn(field, credential)
+        # Capture-verified: this tenant returns the SHA-1 thumbprint as 40 upper
+        # hex characters, which credential_thumbprint must accept unchanged.
+        identifier = credential["customKeyIdentifier"]
+        self.assertEqual(len(identifier), 40)
+        self.assertTrue(all(c in "0123456789ABCDEF" for c in identifier))
+        self.assertEqual(rotate.credential_thumbprint(credential), identifier)
+
+    def _render_report(self, build_credentials, pending_removal=None):
+        """Run `main(['--list-keys'])` against a stubbed Graph and return its
+        report. A freshly generated OAuth key/cert supplies the live thumbprint;
+        token minting and the Graph GET are replaced with recording fakes so the
+        test never touches Microsoft."""
+        from cryptography.hazmat.primitives import hashes, serialization
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            secrets = root / "secrets"  # Rotation refuses any path outside secrets/
+            secrets.mkdir()
+            key_path = secrets / "mail_relay_client_key.pem"
+            cert_path = secrets / "mail_relay_client_cert.pem"
+            key, cert = rotate.make_certificate(3650, 2048, "Mail Relay")
+            key_path.write_bytes(key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption()))
+            cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+            live_thumbprint = cert.fingerprint(hashes.SHA1()).hex().upper()
+            env = {
+                "MAIL_RELAY_TENANT": "00000000-0000-0000-0000-000000000000",
+                "MAIL_RELAY_CLIENT_ID": "11111111-1111-1111-1111-111111111111",
+                "MAIL_SEND_MAILBOX": "relay@example.invalid",
+                "MAIL_RELAY_KEY_FILE": str(key_path),
+                "MAIL_RELAY_CERT_FILE": str(cert_path),
+                "MAIL_ROTATION_STATE_FILE": str(root / "state.json"),
+                "MAIL_ROTATION_LOG_FILE": str(root / "rotation.log"),
+            }
+            app = {"keyCredentials": build_credentials(live_thumbprint)}
+            with mock.patch.dict(os.environ, env, clear=False), \
+                    mock.patch.object(rotate.Rotation, "token", return_value="fake-token"), \
+                    mock.patch.object(rotate.Rotation, "graph", return_value=(200, app)), \
+                    mock.patch.object(rotate.Rotation, "read_state",
+                                      return_value={"pending_removal": pending_removal or {}}), \
+                    mock.patch.object(sys, "argv",
+                                      ["rotate", "--list-keys", "--env-file", str(root / "absent.env")]):
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    code = rotate.main()
+            return code, buffer.getvalue(), live_thumbprint
+
+    def test_report_classifies_live_retiring_and_orphan(self):
+        template = self.FIXTURE["value"][0]["keyCredentials"][0]
+        live_id = "33333333-3333-3333-3333-333333333333"
+        retiring_id = "44444444-4444-4444-4444-444444444444"
+        orphan_id = "55555555-5555-5555-5555-555555555555"
+
+        def build_credentials(live_thumbprint):
+            # Live: customKeyIdentifier is the on-disk cert's thumbprint, in the
+            # capture-verified uppercase-hex encoding Microsoft actually returns.
+            live = dict(template, customKeyIdentifier=live_thumbprint, keyId=live_id)
+            retiring = dict(template, customKeyIdentifier="0" * 40,
+                            keyId=retiring_id, displayName="previous")
+            orphan = dict(template, customKeyIdentifier="F" * 40,
+                          keyId=orphan_id, displayName="abandoned")
+            return [live, retiring, orphan]
+
+        pending = {"key_id": retiring_id, "rotated_at": alert.time.time()}
+        code, report, live_thumbprint = self._render_report(build_credentials, pending)
+
+        self.assertEqual(code, 0)
+        self.assertIn("3 key credential(s)", report)
+        self.assertIn(live_thumbprint, report)
+        self.assertIn("LIVE", report)
+        self.assertIn("RETIRING", report)
+        self.assertIn("ORPHAN", report)
+        # Only the orphan earns a removal hint; the live and retiring keys never do.
+        self.assertIn(f"--remove-key {orphan_id}", report)
+        self.assertNotIn(f"--remove-key {retiring_id}", report)
+        self.assertNotIn(f"--remove-key {live_id}", report)
+
+
+class RemoveKeyAlreadyGoneTests(unittest.TestCase):
+    """removeKey classification against a captured live 400. Microsoft answers a
+    removal of an absent key with the GENERIC code "Request_BadRequest" plus the
+    specific message "No credentials found to be removed."; graph() hands the
+    body back as a raw string. The fixture is that real envelope (request ids
+    zeroed). A different Request_BadRequest must NOT be read as already-gone, or a
+    key that is still present would be abandoned mid-rotation."""
+
+    BODY = (ROOT / "tests/fixtures/removekey-no-credentials-400.json").read_text().strip()
+
+    def test_captured_400_string_is_already_gone(self):
+        # graph() returns the error body as a string -- exercise that exact form.
+        self.assertTrue(rotate.remove_key_already_gone(400, self.BODY))
+
+    def test_same_envelope_as_dict_is_also_recognised(self):
+        self.assertTrue(rotate.remove_key_already_gone(400, json.loads(self.BODY)))
+
+    def test_other_bad_request_is_not_already_gone(self):
+        # Same generic code, different meaning: must not masquerade as success.
+        other = '{"error":{"code":"Request_BadRequest","message":"Invalid proof of possession token."}}'
+        self.assertFalse(rotate.remove_key_already_gone(400, other))
+
+    def test_real_invalid_cert_400_is_not_already_gone(self):
+        # Captured live 2026-08-21: an invalid certificate addKey fails with the
+        # SAME generic code "Request_BadRequest" as the absent-key removeKey, but
+        # a different message. Proof that matching on code alone would misfire --
+        # this real envelope must NOT be read as "already gone".
+        invalid = (ROOT / "tests/fixtures/addkey-invalid-cert-400.json").read_text().strip()
+        self.assertFalse(rotate.remove_key_already_gone(400, invalid))
+
+    def test_non_400_status_is_never_already_gone(self):
+        self.assertFalse(rotate.remove_key_already_gone(200, self.BODY))
+        self.assertFalse(rotate.remove_key_already_gone(500, self.BODY))
+
+    def test_non_json_body_preserves_substring_fallback(self):
+        self.assertTrue(rotate.remove_key_already_gone(400, "No credentials found to be removed."))
+        self.assertFalse(rotate.remove_key_already_gone(400, "some unrelated gateway error"))
+
+
+class RotationWindowTests(unittest.TestCase):
+    """The OAuth rotation window must keep the renewal threshold strictly inside
+    the certificate's life, matching the inbound-TLS guard the entrypoint already
+    enforces. renew_at >= validity churns; renew_at <= 0 rotates only after the
+    certificate is already dead; a one-day certificate cannot satisfy either."""
+
+    def test_safe_windows_are_accepted(self):
+        self.assertEqual(rotate.rotation_window_error(730, 365), "")   # defaults
+        self.assertEqual(rotate.rotation_window_error(2, 1), "")       # smallest viable
+        self.assertEqual(rotate.rotation_window_error(3650, 1825), "")  # ten-year
+
+    def test_threshold_at_or_beyond_validity_is_rejected(self):
+        self.assertNotEqual(rotate.rotation_window_error(30, 365), "")  # renew after life
+        self.assertNotEqual(rotate.rotation_window_error(10, 10), "")   # equal
+        self.assertNotEqual(rotate.rotation_window_error(10, 11), "")
+
+    def test_zero_or_negative_threshold_is_rejected(self):
+        self.assertNotEqual(rotate.rotation_window_error(30, 0), "")
+        self.assertNotEqual(rotate.rotation_window_error(30, -5), "")
+
+    def test_one_day_certificate_is_rejected(self):
+        # renew_at defaults to 1 // 2 == 0, which no window can rescue.
+        self.assertNotEqual(rotate.rotation_window_error(1, 1 // 2), "")
+
+    def test_sub_one_day_validity_is_rejected(self):
+        self.assertNotEqual(rotate.rotation_window_error(0, 0), "")
+        self.assertNotEqual(rotate.rotation_window_error(-3, -1), "")
+
+    def test_guard_is_wired_into_the_network_rotation_path(self):
+        # A misconfigured window must abort before any tenant contact. main()
+        # reaches the guard after the offline --generate-only branch and before
+        # reading the environment, so no network or credentials are needed.
+        with mock.patch.object(sys, "argv",
+                               ["rotate", "--validity", "30", "--renew-at", "365"]), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                rotate.main()
+        self.assertEqual(caught.exception.code, 2)  # argparse parser.error exit code
+
+
+class AddKeyResponseTests(unittest.TestCase):
+    """Captured live addKey 200 (2026-08-21). The rotation path reads
+    result["keyId"] to record the pending addition
+    (rotate-smtp-relay-cert.py: added_key_id = result["keyId"]). This fixture
+    pins that shape and two capture-verified facts: the tenant ACCEPTS a
+    3650-day certificate (no upper validity cap observed), and returns the
+    customKeyIdentifier in uppercase hex."""
+
+    RESPONSE = json.loads((ROOT / "tests/fixtures/addkey-response-200.json").read_text())
+
+    def test_response_exposes_the_top_level_keyid_the_code_reads(self):
+        # The exact extraction the rotation path performs must succeed.
+        added_key_id = self.RESPONSE["keyId"]
+        self.assertEqual(len(added_key_id), 36)
+        self.assertEqual(added_key_id.count("-"), 4)
+
+    def test_identifier_is_hex_and_ten_year_span_is_accepted(self):
+        identifier = self.RESPONSE["customKeyIdentifier"]
+        self.assertEqual(len(identifier), 40)
+        self.assertTrue(all(c in "0123456789ABCDEF" for c in identifier))
+        start = self.RESPONSE["startDateTime"][:4]
+        end = self.RESPONSE["endDateTime"][:4]
+        self.assertGreaterEqual(int(end) - int(start), 10)  # ~10-year span accepted
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

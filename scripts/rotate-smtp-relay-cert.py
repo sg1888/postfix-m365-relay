@@ -114,6 +114,60 @@ def credential_thumbprint(credential: dict) -> str:
         return ""
 
 
+def remove_key_already_gone(status, result) -> bool:
+    """Whether a removeKey response means the key is already absent.
+
+    graph() returns the error body as a raw string on an HTTPError, so the
+    envelope is parsed defensively here (dict or JSON text, with a plain-text
+    fallback). A live tenant answers this case with HTTP 400 and the GENERIC
+    code "Request_BadRequest" -- the same code it uses for a malformed proof or
+    a bad payload -- so the code alone cannot mean "already gone". The specific
+    "No credentials found to be removed" message is the discriminator, read from
+    the structured error rather than a loose match over the whole blob. Both are
+    required so a different Request_BadRequest never masquerades as success.
+    """
+    if status != 400:
+        return False
+    phrase = "No credentials found"
+    if isinstance(result, dict):
+        error = result.get("error") or {}
+        return str(error.get("code", "")) == "Request_BadRequest" and \
+            phrase in str(error.get("message", ""))
+    try:
+        error = (json.loads(result) or {}).get("error") or {}
+    except (ValueError, TypeError):
+        # Non-JSON body: preserve the original substring behaviour so a future
+        # wire format never silently turns a real "already gone" into a failure.
+        return phrase in str(result)
+    return str(error.get("code", "")) == "Request_BadRequest" and \
+        phrase in str(error.get("message", ""))
+
+
+def rotation_window_error(validity: int, renew_at: int) -> str:
+    """Return a human error if the validity/renew window is unsafe, else "".
+
+    Thresholds are whole days (renew_at defaults to validity // 2). The renewal
+    point must fall strictly inside the certificate's life:
+
+      * renew_at >= validity makes every freshly issued certificate instantly
+        "due" -- rotation fires on every run, churning credentials and hammering
+        Graph addKey.
+      * renew_at <= 0 waits until the certificate is already expired, leaving no
+        lead time to add, replicate, and prove a replacement before an outage.
+
+    A one-day certificate cannot satisfy 0 < validity // 2 < validity, so it is
+    rejected here rather than silently rotating only after expiry. Mirrors the
+    inbound-TLS window the entrypoint already enforces.
+    """
+    if validity < 1:
+        return f"--validity must be at least one day (got {validity})"
+    if not 0 < renew_at < validity:
+        return (f"--renew-at ({renew_at}) must be greater than 0 and less than "
+                f"--validity ({validity}); otherwise rotation would trigger at or "
+                f"after the certificate has already expired")
+    return ""
+
+
 class Rotation:
     def __init__(self, project: Path, env: dict[str, str], log_path: Path, dry_run: bool):
         self.project = project
@@ -429,6 +483,12 @@ def main() -> int:
         print(cert.fingerprint(hashes.SHA1()).hex().upper())
         return 0
 
+    # Network rotation only: the offline --generate-only path above has no
+    # renewal semantics, so the window guard applies from here on.
+    window_error = rotation_window_error(args.validity, args.renew_at)
+    if window_error:
+        parser.error(window_error)
+
     env_file = Path(args.env_file)
     env = read_env(env_file)
     env.update(os.environ)
@@ -476,7 +536,7 @@ def main() -> int:
             graph_token,
             {"keyId": key_id, "proof": rotation.proof(current_key, current_cert)},
         )
-        already_gone = status == 400 and "No credentials found" in str(result)
+        already_gone = remove_key_already_gone(status, result)
         if status not in (200, 204) and not already_gone:
             return False, f"HTTP {status}: {result}"
 

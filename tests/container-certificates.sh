@@ -163,3 +163,78 @@ docker exec "$container" test -s "$managed_cert.previous"
 docker exec "$container" openssl x509 -checkend $((31 * 86400)) -noout -in "$managed_cert"
 docker exec "$container" postfix status
 echo 'ok generated inbound TLS renews atomically with a stable key and reloads Postfix'
+
+# The export-cert helper and its relay-admin alias must hand an operator the
+# PUBLIC OAuth certificate for Entra upload — byte-identical to the on-disk copy,
+# a parseable certificate, and never leaking the private key — so bootstrap works
+# without reading logs or knowing the state path.
+oauth_cert=/var/lib/mail-relay/secrets/mail_relay_client_cert.pem
+canonical_export=$(docker exec "$container" cat "$oauth_cert")
+bare_export=$(docker exec "$container" export-cert)
+admin_export=$(docker exec "$container" relay-admin export-cert)
+[[ $bare_export == "$canonical_export" && $admin_export == "$canonical_export" ]]
+[[ $bare_export == *'-----BEGIN CERTIFICATE-----'* ]]
+! grep -qiE 'PRIVATE KEY' <<<"$bare_export"
+docker exec "$container" sh -c "openssl x509 -in '$oauth_cert' -noout -fingerprint -sha256" >/dev/null
+echo 'ok export-cert and relay-admin export-cert emit only the public OAuth certificate'
+
+# relay-admin remove-key is a thin wrapper whose whole purpose is to reject any
+# argument that is not a Graph key UUID before it reaches the rotation tool, so a
+# typo or an option-looking value can never be reinterpreted as a Python flag.
+# Malformed input must exit with the usage code (64) and never invoke rotation.
+expect_remove_key_rejected() {
+  local rc=0
+  docker exec "$container" relay-admin remove-key "$@" >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq 64 ]] || { echo "relay-admin remove-key accepted invalid input: [$*] rc=$rc" >&2; exit 1; }
+}
+expect_remove_key_rejected                                            # missing argument
+expect_remove_key_rejected not-a-uuid                                 # not a UUID at all
+expect_remove_key_rejected --list-keys                                # option smuggling
+expect_remove_key_rejected '11111111-1111-1111-1111-11111111111'      # one hex digit short
+expect_remove_key_rejected 'zzzzzzzz-1111-1111-1111-111111111111'     # non-hex characters
+expect_remove_key_rejected 11111111-1111-1111-1111-111111111111 extra # too many arguments
+# A well-formed UUID clears the validation gate. With no test network the
+# rotation tool then fails (or is timed out), but never with the usage exit code
+# 64 — proving the wrapper handed the id through instead of rejecting it.
+gate_rc=0
+docker exec "$container" sh -c \
+  'timeout 20 relay-admin remove-key 22222222-2222-2222-2222-222222222222' >/dev/null 2>&1 || gate_rc=$?
+[[ $gate_rc -ne 64 ]] || { echo 'relay-admin remove-key rejected a valid UUID' >&2; exit 1; }
+echo 'ok relay-admin remove-key validates the key id before invoking rotation'
+
+# relay-admin rotate exposes only lifecycle-tuning flags and must refuse the
+# rotation tool's credential-overwriting options (--generate-only, --key-path,
+# --cert-path, ...), so a remote admin can never repoint or regenerate the live
+# key material through the wrapper. Forbidden or malformed arguments exit 64.
+expect_rotate_rejected() {
+  local rc=0
+  docker exec "$container" relay-admin rotate "$@" >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq 64 ]] || { echo "relay-admin rotate accepted forbidden args: [$*] rc=$rc" >&2; exit 1; }
+}
+expect_rotate_rejected --generate-only                   # offline key generation
+expect_rotate_rejected --key-path /tmp/x                  # repoint the private key
+expect_rotate_rejected --cert-path /tmp/x                 # repoint the certificate
+expect_rotate_rejected --reuse-key                        # generation modifier
+expect_rotate_rejected --key-bits 2048                    # unlisted option
+expect_rotate_rejected --env-file /tmp/x                  # unlisted option
+expect_rotate_rejected --subject smuggled                 # unlisted option
+expect_rotate_rejected --validity abc                     # non-numeric value
+expect_rotate_rejected --validity                         # missing value
+expect_rotate_rejected --renew-at -5                      # non-numeric (leading dash)
+expect_rotate_rejected --to                               # missing recipient
+expect_rotate_rejected --to --force                       # option smuggled as the value
+expect_rotate_rejected --definitely-not-a-flag            # unknown flag
+
+# Allowlisted flags must clear the wrapper and reach the rotation tool. --dry-run
+# changes nothing; the tool then exits for its own reasons (or is timed out on the
+# absent test network) but never with the usage code, proving the args passed
+# through instead of being rejected.
+expect_rotate_gate_open() {
+  local rc=0
+  docker exec "$container" sh -c "timeout 15 relay-admin rotate $*" >/dev/null 2>&1 || rc=$?
+  [[ $rc -ne 64 ]] || { echo "relay-admin rotate wrongly rejected allowlisted args: [$*]" >&2; exit 1; }
+}
+expect_rotate_gate_open --dry-run                         # bare flag branch
+expect_rotate_gate_open --dry-run --validity 40           # numeric-value branch
+expect_rotate_gate_open --force --dry-run                 # multiple flags
+echo 'ok relay-admin rotate allowlists lifecycle flags and blocks credential-overwriting options'

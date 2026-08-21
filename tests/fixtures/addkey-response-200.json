@@ -1,0 +1,11 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#microsoft.graph.keyCredential",
+  "customKeyIdentifier": "A1B2C3D4E5F60718293A4B5C6D7E8F9012345678",
+  "displayName": "validity probe",
+  "endDateTime": "2036-08-18T15:38:21Z",
+  "key": null,
+  "keyId": "70aa5ca8-0000-0000-0000-000000000000",
+  "startDateTime": "2026-08-21T15:33:21Z",
+  "type": "AsymmetricX509Cert",
+  "usage": "Verify"
+}

@@ -12,7 +12,7 @@ repo_files() {
 # Keep this runner compatible with Bash 3.2, which has arrays but not `mapfile`.
 # Paths in this repository contain no whitespace, so word-splitting the file
 # result is safe across supported development and CI toolchains.
-shell_files=($(repo_files build/postfix-m365-relay scripts tests | awk '/\.sh$|\/relay-users$|\/relay-admin$/' | sort -u))
+shell_files=($(repo_files build/postfix-m365-relay scripts tests | awk '/\.sh$|\/relay-users$|\/relay-admin$|\/export-cert$/' | sort -u))
 bash -n "${shell_files[@]}"
 python3 -m py_compile scripts/refresh-smtp-token.py scripts/rotate-smtp-relay-cert.py \
   $(repo_files tests | awk '/\.py$/')

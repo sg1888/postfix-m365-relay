@@ -20,6 +20,7 @@ usage() {
 Usage:
   relay-admin verify
   relay-admin keys
+  relay-admin export-cert
   relay-admin rotate [--force] [--dry-run] [--validity DAYS] [--renew-at DAYS]
                      [--grace-days DAYS] [--to ADDRESS]
   relay-admin remove-key KEY-ID
@@ -82,6 +83,12 @@ case "$command_name" in
   keys)
     [[ $# -eq 0 ]] || usage
     exec /usr/local/libexec/mail-relay/rotate-smtp-relay-cert.py --list-keys
+    ;;
+  export-cert)
+    # Emit the PUBLIC OAuth certificate for upload to the Entra app. The private
+    # key is never touched; the bare `export-cert` command is the same script.
+    [[ $# -eq 0 ]] || usage
+    exec /usr/local/bin/export-cert
     ;;
   users)
     [[ $# -eq 0 ]] || usage

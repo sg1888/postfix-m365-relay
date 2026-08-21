@@ -1,0 +1,18 @@
+#!/bin/sh
+# Print the Microsoft 365 app PUBLIC certificate (PEM) to stdout so an operator
+# can upload it to the Entra app registration without reading container logs or
+# knowing the on-disk path:
+#
+#   docker exec postfix-relay export-cert > m365-app-cert.pem
+#
+# The PUBLIC certificate is safe to share; the matching private key stays in the
+# state volume and is never emitted. `relay-admin export-cert` calls this same
+# script. Exits non-zero with nothing on stdout until the relay has generated the
+# certificate on first boot.
+set -eu
+cert=${MAIL_STATE_DIR:-/var/lib/mail-relay}/secrets/mail_relay_client_cert.pem
+if [ ! -s "$cert" ]; then
+  echo "export-cert: OAuth certificate not generated yet ($cert); start the relay once, then retry" >&2
+  exit 1
+fi
+exec cat "$cert"

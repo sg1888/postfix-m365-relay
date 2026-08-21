@@ -135,8 +135,10 @@ MAIL_RELAY_DOMAIN=relay.example.local
 # address clients use ONLY if a client verifies the TLS hostname strictly.
 MAIL_RELAY_HOSTNAME=postfix-m365-relay.relay.example.local
 
-# Timezone for log timestamps. If unset, the server's /etc/localtime is used.
-TZ=UTC
+# Timezone for log timestamps (IANA name, e.g. America/New_York). Leave unset to
+# use the container's /etc/localtime, which is UTC unless you bind-mount the
+# host's /etc/localtime into the container.
+#TZ=UTC
 
 
 # -----------------------------------------------------------------------------

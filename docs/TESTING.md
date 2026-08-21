@@ -4,6 +4,23 @@ This is the release gate. Everything runs on a dedicated test mailbox, Entra app
 
 After **any Exchange permission or organization-setting change, wait two full hours before interpreting a send result**. A probe before then is informational only. Record what you observed yourself; config output, exit codes, and SMTP acceptance prove nothing about Microsoft delivery.
 
+## Periodic drift re-qualification
+
+The offline suite asserts against **golden fixtures** in `tests/fixtures/` — real Microsoft Graph responses captured from a tenant at a point in time (`keycredentials.json`, `addkey-response-200.json`, `removekey-no-credentials-400.json`, `addkey-invalid-cert-400.json`). Those tests prove *our code parses that shape correctly*; they cannot prove *Microsoft still sends that shape*. Graph error prose, the `customKeyIdentifier` encoding, app-management lifetime policies, and SMTP throttling can all change with no notice to us.
+
+So on a cadence — **quarterly, and before any release that touches the rotation or Graph paths** — re-run the live behavioral checks below against a **test** tenant and refresh any fixture whose captured response has changed. A drifted fixture is caught here, not in production.
+
+| Live check | Confirms | Fixture to refresh if changed |
+|---|---|---|
+| `relay-admin keys` | keyCredentials shape + `customKeyIdentifier` encoding (hex vs base64) | `keycredentials.json` |
+| addKey a probe cert (Phase 7) | addKey 200 shape (`keyId`), current max accepted validity / any lifetime-policy clamp | `addkey-response-200.json` |
+| removeKey an absent key | the "already gone" 400 message + code still match | `removekey-no-credentials-400.json` |
+| addKey an invalid cert | the invalid-credential 400 message + code | `addkey-invalid-cert-400.json` |
+| burst send > 30/min | whether/how Exchange Online throttles (handled by Postfix deferral) | none — behavioral only |
+| full forced rotation (Phase 7) | proof → swap → re-mint → retire, incl. Outlook-vs-Graph token timing | none — behavioral only |
+
+Capture responses with the relay's own shipped code so the proof/token are valid (see the throwaway probe pattern in the RUNBOOK); redact identifiers, keep the load-bearing shape (encoding, field names, error `code`/`message`). Anything that only exists live — throttling behavior, token-audience timing, a real rotation — has no fixture and must be exercised on the test tenant, never asserted offline.
+
 ## Evidence record
 
 One row per test. No secrets in the record, ever.

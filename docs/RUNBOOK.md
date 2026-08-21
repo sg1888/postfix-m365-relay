@@ -112,6 +112,16 @@ List app-registration credentials read-only:
 docker exec postfix-m365-relay relay-admin keys
 ```
 
+Dump the current public certificate to a file for upload to Entra (useful in
+env-only deployments with no writable `/config` mount, where the bootstrap export
+file has nowhere to land). Prints the public half only; the private key is never
+emitted:
+
+```bash
+docker exec postfix-m365-relay export-cert > m365-app-cert.pem
+# equivalently: relay-admin export-cert
+```
+
 Force rotation only with test objects and an observed proof recipient:
 
 ```bash

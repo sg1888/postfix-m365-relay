@@ -232,6 +232,18 @@ until the upload propagates. Once Microsoft accepts it, the relay removes that
 export automatically and never needs you again — it rotates the certificate on
 its own from then on. The private key never leaves the `mail-relay-state` volume.
 
+Running without a writable `/config` mount (an env-only deployment)? The bootstrap
+file has nowhere to land, so dump the public certificate straight to a file
+instead — no `docker logs` scraping:
+
+```bash
+docker exec postfix-relay export-cert > m365-app-cert.pem
+```
+
+`export-cert` (equivalently `relay-admin export-cert`) prints only the public
+certificate; the private key is never emitted. It exits non-zero until the relay
+has generated the certificate on first boot.
+
 > Prefer `docker run`? See the [full run command](docs/NETWORKING.md). No port is
 > published in either local-network path.
 

@@ -137,7 +137,7 @@ full two hours before treating SMTP success or failure as evidence.
 ## 5. Upload only the public certificate
 
 Start the container with its state volume. On first boot it generates an
-RSA-4096 key and writes the public certificate to
+RSA-2048 key and writes the public certificate to
 `./mail-relay/microsoft365-app-public-cert.pem` (SHA-1 thumbprint alongside in
 `microsoft365-app-cert-thumbprint.txt`). Upload that public PEM under
 **App registrations → Certificates & secrets → Certificates**. Never upload,

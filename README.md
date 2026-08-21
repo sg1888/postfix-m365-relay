@@ -222,7 +222,7 @@ is a bind-mounted host file, not baked into the image; environment variables and
 environment value wins over the matching file line without rewriting the file.
 
 Once the required values are set, an empty state volume triggers generation of an
-RSA-4096 OAuth client certificate. Its **public** half is written to
+RSA-2048 OAuth client certificate. Its **public** half is written to
 `./mail-relay/microsoft365-app-public-cert.pem` (with the SHA-1 thumbprint in
 `./mail-relay/microsoft365-app-cert-thumbprint.txt`) — a normal file in your
 `mail-relay` folder, no `docker logs` needed. Upload that public certificate to

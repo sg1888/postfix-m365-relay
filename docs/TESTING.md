@@ -79,7 +79,7 @@ Empty errors = pass for each file.
 2. Confirm it creates `mail-relay.conf` as `0600`, prints setup instructions,
    doesn't open SMTP, and auto-proceeds after the required test identifiers are
    saved (named senders are optional).
-3. Watch generation of the RSA-4096 OAuth certificate and confirm its public half
+3. Watch generation of the RSA-2048 OAuth certificate and confirm its public half
    is exported to `./<config>/microsoft365-app-public-cert.pem`.
 4. Confirm the private key is `0600`, Postfix stays up, the token loop retries,
    and a locally accepted test message remains deferred without a token.

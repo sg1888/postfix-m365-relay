@@ -316,11 +316,11 @@ def days_remaining(cert) -> int:
     return (not_after - datetime.datetime.now(datetime.timezone.utc)).days
 
 
-def make_certificate(days: int, key_bits: int = 4096, subject_name: str = "postfix-m365-relay", key=None):
+def make_certificate(days: int, key_bits: int = 2048, subject_name: str = "postfix-m365-relay", key=None):
     """Return a self-signed identity with explicit validity and RSA strength.
 
     The same well-tested primitive creates two intentionally different roles:
-    RSA-4096 for the long-lived Entra client credential and RSA-2048 for local
+    RSA-2048 for the long-lived Entra client credential and RSA-2048 for local
     inbound TLS. Callers choose the role; path guards prevent rotation from ever
     treating the inbound key as the OAuth identity.
     """
@@ -428,7 +428,7 @@ def main() -> int:
     parser.add_argument("--renew-at", type=int, default=None,
                         help="Rotate when fewer days than this remain (default: half of --validity)")
     parser.add_argument("--validity", type=int, default=730, help="Validity of the new certificate, in days")
-    parser.add_argument("--key-bits", type=int, default=4096, choices=(2048, 3072, 4096))
+    parser.add_argument("--key-bits", type=int, default=2048, choices=(2048, 3072, 4096))
     parser.add_argument("--generate-only", action="store_true",
                         help="Generate a self-signed pair without contacting Microsoft")
     parser.add_argument("--reuse-key", action="store_true",

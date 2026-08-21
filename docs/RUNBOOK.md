@@ -36,7 +36,7 @@ docker exec postfix-m365-relay postconf -n
 2. Confirm `config/mail-relay.conf` is generated as `0600`, no SMTP listener is
    open, and logs name missing required fields.
 3. Edit the host file. Container proceeds on its own.
-4. Observe RSA-4096 generation; the public half is exported to
+4. Observe RSA-2048 generation; the public half is exported to
    `./mail-relay/microsoft365-app-public-cert.pem`.
 5. Confirm the private key is `0600` in `/var/lib/mail-relay/secrets`.
 6. Upload `./mail-relay/microsoft365-app-public-cert.pem` to the test app
@@ -53,7 +53,7 @@ Skip step 9 and first boot isn't verified—logs don't matter here.
 Token loop runs every five minutes, skips minting while ≥1,800 seconds remain.
 Alerts after consecutive failures; Postfix keeps queuing.
 
-Rotation runs at startup and daily. OAuth path: check expiry, stage RSA-4096,
+Rotation runs at startup and daily. OAuth path: check expiry, stage RSA-2048,
 call Graph `addKey`, wait for directory/token-service replication, send proof
 message, swap files atomically, re-mint immediately, record old key. Inbound-TLS
 path renews image-generated certs only; paths don't touch each other's keys.

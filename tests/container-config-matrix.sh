@@ -21,7 +21,7 @@ install -d -m 0700 "$fixture/config-secrets"
 printf '%s\n' 'device:correct:horse:battery:staple' 'other:still-valid' > "$fixture/config-secrets/smtpd_users"
 chmod 0600 "$fixture/config-secrets/smtpd_users"
 
-# Reuse the state volume so RSA-4096 generation happens once. Every row still
+# Reuse the state volume so RSA-2048 generation happens once. Every row still
 # gets a clean /etc/postfix and /run, exactly as a real container recreation does.
 common=(--network none
   -e MAIL_RELAY_TENANT=00000000-0000-0000-0000-000000000000

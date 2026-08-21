@@ -387,7 +387,7 @@ fi
 /usr/local/libexec/mail-relay/render-config.sh
 postconf -e "myhostname=${MAIL_RELAY_HOSTNAME:-postfix-m365-relay.example.local}"
 postconf -F 'smtp/unix/chroot=n'
-postconf -X 'smtp/inet' 2>/dev/null || true
+postconf -MX 'smtp/inet' 2>/dev/null || true
 postconf -M "${RELAY_PORT}/inet=${RELAY_PORT} inet n - n - - smtpd"
 postfix set-permissions >/dev/null 2>&1 || true
 

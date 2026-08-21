@@ -50,19 +50,35 @@ MAIL_SENDER_NAME_FALLBACK=Example notifications
 #### off is not an open relay.
 MAIL_SENDER_ALLOWLIST=off
 
-#### Relay defaults.
+#### Relay config.
 MAIL_AUTH_MODE=microsoft-cert
-MAIL_RELAY_DOMAIN=relay.example.local
-MAIL_RELAY_HOSTNAME=postfix-m365-relay.relay.example.local
 RELAY_PORT=2525
 MAIL_UPSTREAM_HOST=smtp.office365.com
 MAIL_UPSTREAM_PORT=587
 
+#### Relay's internal domain. Sets Postfix mydomain AND the SASL realm for device
+#### logins. Internal only: it need not be real/DNS-resolvable and need not match
+#### your Microsoft 365 domain; prefer an FQDN (contains a dot). Device clients
+#### still log in with their bare username -- the realm is appended server-side --
+#### and sasldb is rebuilt from MAIL_SMTPD_USERS every boot, so changing this is
+#### safe.
+MAIL_RELAY_DOMAIN=relay.example.local
+
+#### Relay's hostname. Sets Postfix myhostname (the EHLO name and Received-header
+#### host) AND the subject CN of the self-signed inbound TLS certificate. Internal
+#### only -- not your Microsoft 365 domain, need not resolve in DNS; prefer an FQDN
+#### (contains a dot). Microsoft's upstream does not check it. If a device client
+#### does strict TLS hostname verification, set it to the exact name/address
+#### clients use to reach the relay; opportunistic-TLS clients ignore it.
+MAIL_RELAY_HOSTNAME=postfix-m365-relay.relay.example.local
+
+#### Verify security for upstream certs. 
 #### secure verifies Microsoft's certificate; encrypt is compatibility-only.
 MAIL_UPSTREAM_TLS_SECURITY_LEVEL=secure
 
 #### Corporate TLS inspection only: mount the public inspection root, never its key.
-#### MAIL_UPSTREAM_CA_EXTRA_FILE=/run/secrets/corporate_smtp_ca
+# MAIL_UPSTREAM_CA_EXTRA_FILE=/run/secrets/corporate_smtp_ca
+
 #### Deferred messages and deferred bounces are retained for this long.
 MAIL_QUEUE_LIFETIME=12h
 MAIL_RELAY_MAX_SIZE=3m
@@ -77,8 +93,10 @@ MAIL_CA_BUNDLE_MAX_AGE_DAYS=90
 #### OAuth client certificate lifecycle. The container derives the thumbprint.
 MAIL_CERT_VALIDITY_DAYS=730
 
-#### Blank means half of validity.
+#### The number of days after which the certificate will be renewed.  Blank means half of MAX_CERT_VALIDITY_DAYS.
 MAIL_CERT_RENEW_AT_DAYS=
+
+#### The number of days to wait before deleting expired or old certificates.  
 MAIL_CERT_GRACE_DAYS=7
 
 #### Optional BYO first certificate; both are copied into the state volume at boot.

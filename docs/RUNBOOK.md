@@ -132,8 +132,26 @@ Hash the inbound TLS cert before and after—must be byte-identical. Watch addKe
 replication waits, proof send, swap, token mint, removal; exit code alone proves
 nothing.
 
-If OAuth cert is already expired, automated `addKey` can't help. Hand-generate
-and upload a new cert using test-safe procedures.
+If the OAuth cert is expired or deleted at Entra, automated `addKey` can't help
+(it needs a still-trusted cert to sign its proof). The relay handles this: after
+a *definitive* cert fault persists past `MAIL_CERT_RECOVERY_AFTER_SECONDS` and
+`MAIL_CERT_RECOVERY_FAULT_STREAK` checks, it stages **one** standby cert, exports
+its public half, and repeats an upload banner — while testing the old cert first,
+so a transient Entra outage that clears keeps the original. Upload the standby to
+adopt it; the old key is then retired.
+
+To start over by hand — a fresh cert you then upload — without editing files in
+the container:
+
+```bash
+docker exec postfix-m365-relay relay-admin reset-oauth-cert
+# or, with no exec, drop the sentinel into the /config mount:
+#   touch ./config/reset-oauth-cert
+```
+
+Both regenerate the live cert, keep the previous pair as `.previous`, and raise
+the repeated upload banner. See docs/CONFIGURATION.md for the full recovery and
+multi-instance ownership model.
 
 ## Queueing and token failures
 

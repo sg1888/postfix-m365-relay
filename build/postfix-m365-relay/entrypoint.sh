@@ -127,6 +127,10 @@ STATE_DIR=${MAIL_STATE_DIR:-/var/lib/mail-relay}
 RUN_DIR=${MAIL_RUN_DIR:-/run/mail-relay}
 RELAY_PORT=${RELAY_PORT:-2525}
 export STATE_DIR RUN_DIR RELAY_PORT
+# Export the resolved state dir and config path so the supervised loops and
+# cert-action.sh (which the token/verify loops call) resolve identical paths
+# whether or not the operator customised them.
+export MAIL_STATE_DIR=$STATE_DIR MAIL_CONFIG_FILE=$CONFIG_FILE
 
 # `TZ` is understood by the C library used by Postfix and by the bundled tools.
 # Validate it as an IANA tzdata name rather than accepting a path: an absolute
@@ -159,6 +163,21 @@ done < <(env)
 install -d -m 0755 /etc/postfix "$STATE_DIR" "$STATE_DIR/secrets" "$STATE_DIR/inbound-tls"
 install -d -m 0750 -o postfix -g postfix "$RUN_DIR" "$RUN_DIR/log"
 cp -a /usr/share/postfix-defaults/. /etc/postfix/
+
+# Stable per-instance identity, created once and kept in the state volume so it
+# is unique per volume, i.e. per instance. It is stamped into every certificate
+# this instance registers with Entra, so a shared app registration can never
+# confuse one instance's credential for another's. An operator may pin it with
+# MAIL_INSTANCE_ID; otherwise a UUID is generated on first boot and reused.
+INSTANCE_ID_FILE=$STATE_DIR/instance-id
+if [[ -n ${MAIL_INSTANCE_ID:-} ]]; then
+  printf '%s\n' "$MAIL_INSTANCE_ID" > "$INSTANCE_ID_FILE"
+elif [[ ! -s $INSTANCE_ID_FILE ]]; then
+  python3 -c 'import uuid; print(uuid.uuid4())' > "$INSTANCE_ID_FILE"
+fi
+MAIL_INSTANCE_ID=$(tr -d '\r\n' < "$INSTANCE_ID_FILE")
+export MAIL_INSTANCE_ID
+log "instance id $MAIL_INSTANCE_ID"
 
 # Outbound `secure` TLS authenticates smtp.office365.com against the distro CA
 # store. A TLS-inspecting organization can add its public inspection root
@@ -222,48 +241,28 @@ fi
 # to seed the Entra app registration (the bootstrap "one-way door": until one
 # cert is trusted there, the relay cannot sign the proof that would let it roll
 # its own keys). After that first upload the relay rotates itself via Graph and
-# never needs the operator again. Export the public certificate as a clearly
-# named file in the host-editable /config directory so it can be retrieved
-# without `docker logs`, and remove it automatically once Microsoft accepts it
-# (proven by a successful token mint). The canonical cert never leaves the state
-# volume; only this pasteable public copy lives in /config, and only until used.
-CONFIG_DIR=${CONFIG_FILE%/*}
-[[ $CONFIG_DIR != "$CONFIG_FILE" ]] || CONFIG_DIR=.
-BOOTSTRAP_CERT_EXPORT=$CONFIG_DIR/microsoft365-app-public-cert.pem
-BOOTSTRAP_THUMBPRINT_EXPORT=$CONFIG_DIR/microsoft365-app-cert-thumbprint.txt
-
+# never needs the operator again. The public certificate is exported to the
+# host-editable /config directory so it can be retrieved without `docker logs`,
+# and removed automatically once Microsoft accepts it (proven by a successful
+# token mint). The canonical cert never leaves the state volume; only the
+# pasteable public copy lives in /config, and only until used.
+#
+# The pasteable-export placement, the durable "upload required" flag, and the
+# repeated banner all live in cert-action.sh so first boot, manual reset, and
+# automatic recovery share exactly one implementation. cert-action.sh derives the
+# same /config export paths from MAIL_CONFIG_FILE that this script does.
 publish_bootstrap_cert() {
-  local cert=$1 thumbprint=$2 owner
-  if [[ -d $CONFIG_DIR && -w $CONFIG_DIR ]]; then
-    install -m 0644 "$cert" "$BOOTSTRAP_CERT_EXPORT"
-    printf '%s\n' "$thumbprint" > "$BOOTSTRAP_THUMBPRINT_EXPORT"
-    chmod 0644 "$BOOTSTRAP_THUMBPRINT_EXPORT"
-    # Match the config directory's numeric owner so the administrator who
-    # launched the stack can read and delete the export without sudo, exactly as
-    # first-run does for the config file itself.
-    owner=$(stat -c '%u:%g' "$CONFIG_DIR" 2>/dev/null || true)
-    [[ -z ${owner:-} ]] || chown "$owner" "$BOOTSTRAP_CERT_EXPORT" "$BOOTSTRAP_THUMBPRINT_EXPORT" 2>/dev/null || true
-    log 'ACTION REQUIRED: upload this PUBLIC certificate to your Microsoft 365 (Entra) app registration, then the relay starts sending:'
-    log "  file:       $BOOTSTRAP_CERT_EXPORT"
-    log "  thumbprint: $thumbprint"
-    log 'Mail is queued until Entra accepts it. This file is removed automatically once accepted.'
-  else
-    # No writable /config mount (advanced, env-only deployments): the log is the
-    # only delivery channel, so print the PEM as a fallback.
-    log 'ACTION REQUIRED: upload the following PUBLIC certificate to your Microsoft 365 (Entra) app registration.'
-    log "Certificate SHA-1 thumbprint: $thumbprint"
-    sed 's/^/PUBLIC-CERTIFICATE: /' "$cert"
-    log 'The relay remains running and queues mail until Entra accepts this certificate.'
-  fi
+  local cert=$1 thumbprint=$2 reason=${3:-first-certificate-upload}
+  MAIL_STATE_DIR=$STATE_DIR MAIL_CONFIG_FILE=$CONFIG_FILE \
+    /usr/local/libexec/mail-relay/cert-action.sh require "$reason" "$thumbprint" "$cert"
 }
 
 remove_bootstrap_cert() {
   # Called once a token mint proves Microsoft trusts the live certificate. Only
-  # the pasteable copy is removed; the canonical cert stays in the state volume.
-  local removed=no
-  [[ ! -e $BOOTSTRAP_CERT_EXPORT ]] || { rm -f "$BOOTSTRAP_CERT_EXPORT"; removed=yes; }
-  [[ ! -e $BOOTSTRAP_THUMBPRINT_EXPORT ]] || { rm -f "$BOOTSTRAP_THUMBPRINT_EXPORT"; removed=yes; }
-  [[ $removed == no ]] || log "Microsoft 365 accepted the certificate; removed the bootstrap export from $CONFIG_DIR."
+  # the pasteable copy and the flag are removed; the canonical cert stays in the
+  # state volume.
+  MAIL_STATE_DIR=$STATE_DIR MAIL_CONFIG_FILE=$CONFIG_FILE \
+    /usr/local/libexec/mail-relay/cert-action.sh clear
 }
 
 oauth_key=$STATE_DIR/secrets/mail_relay_client_key.pem
@@ -412,6 +411,9 @@ postconf -M "${RELAY_PORT}/inet=${RELAY_PORT} inet n - n - - smtpd"
 postfix set-permissions >/dev/null 2>&1 || true
 
 token_file=${MAIL_TOKEN_FILE:-$RUN_DIR/relay.json}
+# Export so the supervised recovery check resolves the same token file when
+# judging whether the live certificate is currently healthy.
+export MAIL_TOKEN_FILE=$token_file
 # Make one bounded mint attempt before Postfix can activate a persistent
 # deferred queue.  In the first live restart test, Postfix started a few
 # milliseconds ahead of the token loop, attempted XOAUTH2 with an empty tmpfs,
@@ -427,12 +429,16 @@ if /usr/local/libexec/mail-relay/refresh-smtp-token.py --min-remaining 1800; the
   remove_bootstrap_cert
 else
   log 'startup token mint failed; starting Postfix in queue-first mode while the supervised loop retries'
-  # Not yet accepted by Microsoft. If a generated certificate exists but its
-  # pasteable copy is missing (e.g. a redeploy before the first upload, or a lost
-  # export), re-expose it so the operator can still complete the bootstrap.
-  if [[ -d $CONFIG_DIR && -w $CONFIG_DIR && -s $oauth_cert && ! -e $BOOTSTRAP_CERT_EXPORT ]]; then
+  # Not yet accepted by Microsoft. If a certificate exists but no upload notice is
+  # currently active (e.g. a redeploy before the first upload, a lost export, or a
+  # previously-accepted certificate that was deleted at Entra), (re-)raise it so
+  # the operator can complete the bootstrap. cert-action.sh status is the durable
+  # signal, which also covers env-only deployments with no writable /config.
+  if [[ -s $oauth_cert ]] && \
+     ! MAIL_STATE_DIR=$STATE_DIR MAIL_CONFIG_FILE=$CONFIG_FILE \
+       /usr/local/libexec/mail-relay/cert-action.sh status >/dev/null 2>&1; then
     existing_thumbprint=$(openssl x509 -in "$oauth_cert" -noout -fingerprint -sha1 2>/dev/null | sed 's/.*=//; s/://g')
-    publish_bootstrap_cert "$oauth_cert" "${existing_thumbprint:-unavailable}"
+    publish_bootstrap_cert "$oauth_cert" "${existing_thumbprint:-unavailable}" certificate-upload-required
   fi
 fi
 [[ -s $token_file ]] || log "token is not present yet; Postfix will queue mail while the token loop retries"

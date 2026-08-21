@@ -75,6 +75,11 @@ if [[ -s $oauth_cert ]]; then
   else bad certificate 'OAuth certificate is expired or unreadable'; fi
 else bad certificate 'OAuth certificate is absent'; fi
 
+# Repeat the "upload a certificate to Entra" banner at the verifier's cadence
+# (hourly by default) whenever an upload is still outstanding, so the notice
+# stays legible and does not drown in failed-delivery lines. No-op when none.
+/usr/local/libexec/mail-relay/cert-action.sh remind || true
+
 if [[ ${MAIL_INBOUND_TLS:-off} != off && -n ${MAIL_INBOUND_TLS_CERT_EFFECTIVE:-} ]]; then
   if openssl x509 -checkend $((30*86400)) -noout -in "$MAIL_INBOUND_TLS_CERT_EFFECTIVE" >/dev/null 2>&1; then
     /usr/local/libexec/mail-relay/alert.sh recover inbound-tls-expiring \

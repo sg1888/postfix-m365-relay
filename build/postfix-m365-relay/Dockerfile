@@ -84,6 +84,7 @@ COPY build/postfix-m365-relay/entrypoint.sh build/postfix-m365-relay/relay-super
      build/postfix-m365-relay/export-cert /usr/local/bin/
 COPY build/postfix-m365-relay/render-config.sh build/postfix-m365-relay/verify-relay.sh \
      build/postfix-m365-relay/rotate-inbound-tls.sh build/postfix-m365-relay/alert.sh \
+     build/postfix-m365-relay/cert-action.sh \
      scripts/alert-event.py \
      scripts/refresh-smtp-token.py \
      scripts/rotate-smtp-relay-cert.py /usr/local/libexec/mail-relay/

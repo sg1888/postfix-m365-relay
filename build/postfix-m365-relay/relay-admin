@@ -24,6 +24,7 @@ Usage:
   relay-admin rotate [--force] [--dry-run] [--validity DAYS] [--renew-at DAYS]
                      [--grace-days DAYS] [--to ADDRESS]
   relay-admin remove-key KEY-ID
+  relay-admin reset-oauth-cert
   relay-admin users
 EOF
   exit 64
@@ -96,9 +97,20 @@ case "$command_name" in
     ;;
   remove-key)
     # Graph key IDs are UUIDs. Validate before calling a state-changing command
-    # so a typo cannot be reinterpreted as another Python option.
+    # so a typo cannot be reinterpreted as another Python option. The override
+    # that would delete another instance's certificate is deliberately NOT exposed
+    # here: through this admin surface, a foreign or live credential is always
+    # refused. An operator who truly must override runs the script directly.
     [[ $# -eq 1 && $1 =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || usage
     exec /usr/local/libexec/mail-relay/rotate-smtp-relay-cert.py --remove-key "$1"
+    ;;
+  reset-oauth-cert)
+    # Regenerate the live OAuth certificate from scratch and require re-upload to
+    # Entra. Deliberately destructive; the outgoing pair is kept as .previous by
+    # the script. This is the interactive equivalent of dropping the
+    # /config/reset-oauth-cert sentinel file.
+    [[ $# -eq 0 ]] || usage
+    exec /usr/local/libexec/mail-relay/rotate-smtp-relay-cert.py --reset --yes
     ;;
   rotate)
     # Passing an array to one fixed executable is not shell evaluation, but the

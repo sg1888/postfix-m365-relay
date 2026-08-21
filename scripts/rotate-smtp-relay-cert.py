@@ -68,6 +68,7 @@ import base64
 import datetime
 import json
 import os
+import re
 import smtplib
 import ssl
 import subprocess
@@ -168,6 +169,99 @@ def rotation_window_error(validity: int, renew_at: int) -> str:
     return ""
 
 
+# --- instance identity and credential ownership -----------------------------
+#
+# One Entra App Registration may be shared by several relay instances, each
+# holding its OWN certificate. To stop one instance from ever treating a
+# sibling's live credential as a deletable orphan, every key this instance adds
+# is stamped with a stable per-instance identifier in its Graph displayName, and
+# ownership is read back from that stamp. Certificates uploaded by a human (the
+# first credential, or a recovery credential) carry no stamp and are reported as
+# ownership-unknown rather than guessed at.
+INSTANCE_TAG = "inst:"
+# The default id is a UUID, but an operator may pin MAIL_INSTANCE_ID to a
+# readable name, so the stamp accepts letters, digits, and the usual separators
+# (never a space, which terminates the token in the displayName).
+_INSTANCE_TAG_RE = re.compile(r"inst:([A-Za-z0-9._-]{1,128})")
+
+# Ownership labels. Only SUPERSEDED and RETIRING are ever this instance's to
+# remove; FOREIGN and UNMONITORED must never be auto-suggested or hand-removed
+# without a deliberate, purpose-named override.
+OWN_LIVE = "live"
+OWN_RETIRING = "retiring"
+OWN_SUPERSEDED = "superseded"
+OWN_FOREIGN = "foreign"
+OWN_UNMONITORED = "unmonitored"
+
+
+def rotation_display_name(instance_id: str, when: "datetime.date | None" = None) -> str:
+    """Graph displayName for a key this instance adds, carrying its owner stamp."""
+    day = (when or datetime.date.today()).isoformat()
+    stamp = f" {INSTANCE_TAG}{instance_id}" if instance_id else ""
+    return f"postfix-m365-relay mail relay{stamp} (rotated {day})"
+
+
+def instance_id_of(display_name: str) -> str:
+    """Return the instance id stamped into a displayName, or '' if unstamped."""
+    match = _INSTANCE_TAG_RE.search(display_name or "")
+    return match.group(1) if match else ""
+
+
+def classify_credential(credential: dict, live_thumbprint: str,
+                        my_instance_id: str, retiring_key_id: "str | None") -> str:
+    """Classify one app keyCredential from THIS instance's point of view.
+
+    The classification decides, above all, what may be removed. Erring in the
+    permissive direction lets an operator delete another instance's live
+    certificate, so anything not provably this instance's own is reported as
+    FOREIGN or UNMONITORED and never offered for removal. A live certificate is
+    identified by thumbprint regardless of who uploaded it, so an instance always
+    recognises its own in-use credential even when it was added by hand.
+    """
+    if credential_thumbprint(credential) == live_thumbprint and live_thumbprint:
+        return OWN_LIVE
+    if retiring_key_id and credential.get("keyId") == retiring_key_id:
+        return OWN_RETIRING
+    stamped = instance_id_of(credential.get("displayName") or "")
+    if stamped and my_instance_id:
+        return OWN_SUPERSEDED if stamped == my_instance_id else OWN_FOREIGN
+    # Either unstamped (human-uploaded) or this instance has no identity to
+    # compare against: ownership cannot be proven, so treat it as hands-off.
+    return OWN_UNMONITORED
+
+
+def classify_token_failure(status: "int | None", body: str) -> str:
+    """Classify a failed OAuth token mint into an actionable category.
+
+    The recovery path acts only on a DEFINITIVE certificate fault. A transient
+    network or Entra outage must never be mistaken for one, or the relay would
+    demand a fresh certificate during an outage that clears on its own. A missing
+    Exchange role is a certificate-irrelevant configuration fault and must not
+    trigger regeneration either.
+
+      * "transient"  -- no HTTP status (network/DNS/TLS) or a 5xx from Entra.
+      * "cert-fault" -- the certificate is expired, revoked, or no longer on the
+                        app registration (AADSTS700027 and its kin).
+      * "scope"      -- authentication works but the Exchange role/resource
+                        principal is missing; a new certificate cannot fix it.
+      * "unknown"    -- a 4xx that matches none of the above; treated as NOT a
+                        definitive cert fault so recovery never fires on a guess.
+    """
+    text = (body or "").lower()
+    if status is None or status >= 500:
+        return "transient"
+    if ("aadsts700027" in text
+            or ("certificate" in text
+                and ("not valid" in text or "not found" in text
+                     or "expired" in text or "revoked" in text
+                     or "no longer" in text))):
+        return "cert-fault"
+    if ("resource principal" in text or "sendasapp" in text
+            or "aadsts501051" in text or "aadsts500011" in text):
+        return "scope"
+    return "unknown"
+
+
 class Rotation:
     def __init__(self, project: Path, env: dict[str, str], log_path: Path, dry_run: bool):
         self.project = project
@@ -177,6 +271,13 @@ class Rotation:
         self.tenant = env["MAIL_RELAY_TENANT"]
         self.client_id = env["MAIL_RELAY_CLIENT_ID"]
         self.mailbox = env["MAIL_SEND_MAILBOX"]
+        # Stable per-instance identity, stamped into every key this instance adds
+        # so a shared app registration never confuses one instance's certificate
+        # for another's. Empty is tolerated (legacy state); ownership then falls
+        # back to the on-disk live thumbprint only. Normalise to the stamp's
+        # charset so stamping and comparison always agree, even for an operator
+        # value that contained a space or other stray character.
+        self.instance_id = re.sub(r"[^A-Za-z0-9._-]", "-", env.get("MAIL_INSTANCE_ID", "").strip())
         self.key_path = Path(env.get("MAIL_RELAY_KEY_FILE", "/var/lib/mail-relay/secrets/mail_relay_client_key.pem"))
         self.cert_path = Path(env.get("MAIL_RELAY_CERT_FILE", "/var/lib/mail-relay/secrets/mail_relay_client_cert.pem"))
         if not self.key_path.is_absolute():
@@ -421,6 +522,269 @@ def run_immediate_token_refresh(
     ).returncode == 0
 
 
+# --- automatic recovery from a live certificate Entra no longer trusts -------
+#
+# When the live certificate is deleted at Entra or expires, self-rotation is a
+# one-way door: addKey needs a trusted certificate to sign its proof, and the
+# dead one cannot. Recovery therefore cannot re-register itself; it stages a NEW
+# certificate and asks a human to upload it, exactly like first boot -- but does
+# so WITHOUT disturbing the live certificate, which may yet come back (a transient
+# Exchange outage, or an admin re-adding the key). The governing invariant: the
+# live on-disk pair is never removed or swapped until a new certificate has
+# proven it can send AND the old one is confirmed still failing. The old
+# certificate is tested first on every pass, so a healed outage always wins.
+
+
+def _recovery_disabled(env: dict) -> bool:
+    return env.get("MAIL_CERT_RECOVERY_ENABLED", "yes").strip().lower() in (
+        "no", "0", "false", "off")
+
+
+def _token_is_fresh(env: dict, margin: int = 300) -> bool:
+    """True when the live token file still has comfortable life; a cheap proxy
+    for "the live certificate is working" that avoids an extra token request."""
+    token_file = Path(env.get("MAIL_TOKEN_FILE") or "/run/mail-relay/relay.json")
+    try:
+        data = json.loads(token_file.read_text())
+        return int(data.get("expiry", 0)) - int(time.time()) >= margin
+    except (OSError, ValueError):
+        return False
+
+
+def _try_mint(rotation: "Rotation", key, cert) -> "tuple[bool, int | None, str]":
+    """Attempt an Outlook-scope token mint; return (ok, http_status, body).
+
+    A network failure yields status None (transient); an HTTP error yields its
+    code and body so the AADSTS reason can be classified. No token is returned or
+    logged -- only whether the certificate could mint one.
+    """
+    try:
+        rotation.token(OUTLOOK_SCOPE, key, cert)
+        return True, 200, ""
+    except urllib.error.HTTPError as error:
+        return False, error.code, error.read().decode("utf-8", "replace")[:600]
+    except urllib.error.URLError as error:
+        return False, None, str(getattr(error, "reason", error))
+    except Exception as error:  # noqa: BLE001 - reported, not raised, so a loop continues
+        return False, None, f"{type(error).__name__}: {error}"
+
+
+def _cert_action(rotation: "Rotation", *argv: str) -> None:
+    script = Path(__file__).with_name("cert-action.sh")
+    if script.is_file():
+        subprocess.run([str(script), *argv], check=False)
+
+
+def _recovery_paths(rotation: "Rotation") -> "tuple[Path, Path]":
+    return (rotation.key_path.with_suffix(".pem.recovery"),
+            rotation.cert_path.with_suffix(".pem.recovery"))
+
+
+def _discard_standby(rotation: "Rotation") -> None:
+    for path in _recovery_paths(rotation):
+        path.unlink(missing_ok=True)
+
+
+def _generate_standby(rotation: "Rotation", env: dict, args) -> int:
+    """Stage ONE new certificate and expose its public half for upload."""
+    from cryptography.hazmat.primitives import hashes, serialization
+
+    new_key, new_cert = make_certificate(args.validity, args.key_bits, args.subject)
+    thumbprint = new_cert.fingerprint(hashes.SHA1()).hex().upper()
+    staging_key, staging_cert = _recovery_paths(rotation)
+    handle = os.open(staging_key, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(handle, "wb") as stream:
+        stream.write(new_key.private_bytes(serialization.Encoding.PEM,
+                                           serialization.PrivateFormat.PKCS8,
+                                           serialization.NoEncryption()))
+    staging_cert.write_bytes(new_cert.public_bytes(serialization.Encoding.PEM))
+    staging_cert.chmod(0o644)
+    state = rotation.read_state()
+    state["recovery"] = {"thumbprint": thumbprint, "generated_at": int(time.time())}
+    rotation.write_state(state)
+    rotation.log("recover", "ok",
+                 f"generated a standby certificate {thumbprint}; awaiting operator upload")
+    _cert_action(rotation, "require", "recovery-standby-awaiting-upload",
+                 thumbprint, str(staging_cert))
+    return 0
+
+
+def _adopt_standby(rotation: "Rotation", env: dict, args, state: dict,
+                   current_cert, new_key, new_cert) -> int:
+    """Swap a proven standby into the live slot and retire the old credential.
+
+    Reached only after the standby minted a token AND (when a recipient exists)
+    sent a real proof message, and only while the old certificate is still
+    failing. The old pair is preserved as .previous; the old Entra key is
+    scheduled for best-effort retirement rather than removed inline.
+    """
+    from cryptography.hazmat.primitives import hashes
+
+    old_thumbprint = current_cert.fingerprint(hashes.SHA1()).hex().upper()
+    new_thumbprint = new_cert.fingerprint(hashes.SHA1()).hex().upper()
+    staging_key, staging_cert = _recovery_paths(rotation)
+    os.replace(rotation.key_path, rotation.key_path.with_suffix(".pem.previous"))
+    os.replace(rotation.cert_path, rotation.cert_path.with_suffix(".pem.previous"))
+    os.replace(staging_key, rotation.key_path)
+    os.replace(staging_cert, rotation.cert_path)
+    rotation.log("recover", "ok",
+                 f"adopted the standby certificate; live thumbprint now {new_thumbprint}")
+    for stale in ("recovery", "cert_fault_streak", "cert_fault_since"):
+        state.pop(stale, None)
+    # Best-effort: if the old key still lingers on the app, schedule its removal
+    # through the normal grace-period path. It is often already gone (deleted at
+    # Entra), in which case the later removeKey is a confirmed no-op.
+    try:
+        graph_token = rotation.token(f"{GRAPH}/.default", new_key, new_cert)
+        app_path = f"/applications(appId='{rotation.client_id}')"
+        gstatus, app = rotation.graph("GET", app_path, graph_token)
+        if gstatus == 200:
+            for cred in app.get("keyCredentials", []):
+                if credential_thumbprint(cred) == old_thumbprint:
+                    state["pending_removal"] = {
+                        "key_id": cred["keyId"], "thumbprint": old_thumbprint,
+                        "rotated_at": int(time.time())}
+                    rotation.log("recover", "ok",
+                                 f"scheduled the old key {cred['keyId']} for retirement")
+                    break
+    except Exception as error:  # noqa: BLE001 - scheduling is best-effort
+        rotation.log("recover", "note",
+                     f"could not schedule old-key retirement now: {type(error).__name__}")
+    rotation.write_state(state)
+    _cert_action(rotation, "clear")
+    refresh_script = Path(__file__).with_name("refresh-smtp-token.py")
+    run_immediate_token_refresh(refresh_script, Path(args.env_file), env)
+    return 0
+
+
+def _advance_pending_standby(rotation: "Rotation", env: dict, args, state: dict,
+                             current_cert) -> int:
+    """Test whether the staged standby is trusted yet; adopt it if it proves out."""
+    staging_key, staging_cert = _recovery_paths(rotation)
+    if not staging_key.is_file() or not staging_cert.is_file():
+        state.pop("recovery", None)
+        rotation.write_state(state)
+        rotation.log("recover", "note",
+                     "standby files missing; will regenerate on the next definitive fault")
+        return 0
+    try:
+        new_key, new_cert = rotation._load(staging_key, staging_cert)
+    except Exception as error:  # noqa: BLE001
+        rotation.log("recover", "note", f"standby unreadable ({type(error).__name__})")
+        return 0
+    ok, _status, _body = _try_mint(rotation, new_key, new_cert)
+    if not ok:
+        rotation.log("recover", "waiting",
+                     "standby certificate not yet accepted by Entra; upload still required")
+        _cert_action(rotation, "remind")
+        return 0
+    # Trusted. Prove it can actually SEND before adopting, when a recipient exists.
+    recipient = args.to or env.get("MAIL_ROTATION_TEST_RECIPIENT") or env.get("MAIL_ADMIN_EMAIL")
+    if recipient:
+        try:
+            from cryptography.hazmat.primitives import hashes
+            smtp_token = rotation.token(OUTLOOK_SCOPE, new_key, new_cert)
+            new_thumbprint = new_cert.fingerprint(hashes.SHA1()).hex().upper()
+            sent, detail = send_proof_message(
+                rotation.mailbox, smtp_token, recipient, new_thumbprint,
+                env.get("MAIL_UPSTREAM_HOST", SMTP_HOST),
+                int(env.get("MAIL_UPSTREAM_PORT", SMTP_PORT)))
+        except Exception as error:  # noqa: BLE001
+            sent, detail = False, f"{type(error).__name__}: {error}"
+        if not sent:
+            rotation.log("recover", "waiting",
+                         f"standby accepted but proof send not yet succeeding: {detail}")
+            return 0
+    else:
+        rotation.log("recover", "note",
+                     "no proof recipient configured; adopting the standby on token trust alone")
+    return _adopt_standby(rotation, env, args, state, current_cert, new_key, new_cert)
+
+
+def run_recovery(rotation: "Rotation", env: dict, args) -> int:
+    if _recovery_disabled(env):
+        return 0
+    state = rotation.read_state()
+    recovery = state.get("recovery")
+
+    # Healthy-path shortcut: no recovery in flight and a fresh live token means
+    # the live certificate is plainly working. Clear any stale fault streak and
+    # avoid an extra token request every loop.
+    if not recovery and _token_is_fresh(env):
+        if state.pop("cert_fault_streak", None) is not None \
+                or state.pop("cert_fault_since", None) is not None:
+            rotation.write_state(state)
+        return 0
+
+    if not rotation.key_path.is_file() or not rotation.cert_path.is_file():
+        rotation.log("recover", "note",
+                     "no live certificate on disk; run relay-admin reset-oauth-cert")
+        return 0
+    try:
+        current_key, current_cert = rotation._load(rotation.key_path, rotation.cert_path)
+    except Exception as error:  # noqa: BLE001
+        rotation.log("recover", "note",
+                     f"live certificate unreadable ({type(error).__name__}); consider a reset")
+        return 0
+
+    # Step 1: does the OLD (live) certificate work right now?
+    old_ok, old_status, old_body = _try_mint(rotation, current_key, current_cert)
+    if old_ok:
+        if recovery:
+            _discard_standby(rotation)
+            for stale in ("recovery", "cert_fault_streak", "cert_fault_since"):
+                state.pop(stale, None)
+            rotation.write_state(state)
+            _cert_action(rotation, "clear")
+            rotation.log("recover", "ok",
+                         "original certificate is working again; standby discarded")
+        elif state.pop("cert_fault_streak", None) is not None \
+                or state.pop("cert_fault_since", None) is not None:
+            rotation.write_state(state)
+        return 0
+
+    # The live certificate is failing. Classify why before doing anything.
+    fault = classify_token_failure(old_status, old_body)
+    if days_remaining(current_cert) <= 0:
+        fault = "cert-fault"  # a locally expired certificate is definitive
+    if fault == "transient":
+        rotation.log("recover", "waiting",
+                     "token mint failing transiently (network/Entra); not a certificate fault")
+        return 0
+    if fault == "scope":
+        rotation.log("recover", "note",
+                     "authentication fails on Exchange authorization, not the certificate; "
+                     "a new certificate will not help (check the SMTP.SendAsApp role)")
+        return 0
+    if fault == "unknown":
+        rotation.log("recover", "waiting",
+                     f"token mint failing (HTTP {old_status}) but not a recognised certificate "
+                     f"fault; holding rather than generating a certificate on a guess")
+        return 0
+
+    # Definitive certificate fault.
+    if recovery:
+        return _advance_pending_standby(rotation, env, args, state, current_cert)
+
+    streak = int(state.get("cert_fault_streak", 0)) + 1
+    since = int(state.get("cert_fault_since") or time.time())
+    state["cert_fault_streak"] = streak
+    state["cert_fault_since"] = since
+    rotation.write_state(state)
+    try:
+        need_streak = int(env.get("MAIL_CERT_RECOVERY_FAULT_STREAK", "6") or 6)
+        need_seconds = int(env.get("MAIL_CERT_RECOVERY_AFTER_SECONDS", "21600") or 21600)
+    except ValueError:
+        need_streak, need_seconds = 6, 21600
+    waited = int(time.time()) - since
+    if streak < need_streak or waited < need_seconds:
+        rotation.log("recover", "waiting",
+                     f"definitive certificate fault (streak {streak}/{need_streak}, "
+                     f"{waited}s/{need_seconds}s) before generating a standby")
+        return 0
+    return _generate_standby(rotation, env, args)
+
+
 def main() -> int:
     project = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -444,6 +808,14 @@ def main() -> int:
                         help="Read-only: list the certificates on the app registration and flag orphans")
     parser.add_argument("--remove-key", default=None, metavar="KEY_ID",
                         help="Remove one key credential by keyId, confirming it is gone")
+    parser.add_argument("--reset", action="store_true",
+                        help="Regenerate the live OAuth certificate from scratch and require re-upload")
+    parser.add_argument("--recover", action="store_true",
+                        help="Non-destructive self-recovery check for a live certificate Entra no longer trusts")
+    parser.add_argument("--yes", action="store_true",
+                        help="Confirm a destructive action (--reset, or removing an unmonitored key)")
+    parser.add_argument("--yes-remove-another-instances-cert", action="store_true",
+                        help="Deliberately override the guard that protects another instance's certificate")
     args = parser.parse_args()
 
     # Half the validity, so changing --validity moves the threshold with it
@@ -502,6 +874,68 @@ def main() -> int:
     except ValueError as error:
         print(error, file=sys.stderr)
         return 1
+
+    # --- operator reset: regenerate the live certificate from scratch ---------
+    #
+    # Deliberately destructive and offline: it replaces the live key/cert with a
+    # brand new self-signed pair and requires the operator to upload the public
+    # half again, exactly like first boot. It must work even when the current
+    # pair is missing or corrupt (that is a reason to reset), so it runs before
+    # the current-certificate load below. The outgoing pair is kept as .previous
+    # so an accidental reset is recoverable.
+    if args.reset:
+        if not args.yes:
+            print("--reset regenerates the live OAuth certificate and requires re-upload to "
+                  "Entra; pass --yes to confirm", file=sys.stderr)
+            return 1
+        old_thumbprint = ""
+        if rotation.key_path.is_file() and rotation.cert_path.is_file():
+            try:
+                _, old_cert = rotation._load(rotation.key_path, rotation.cert_path)
+                old_thumbprint = old_cert.fingerprint(hashes.SHA1()).hex().upper()
+            except Exception:  # noqa: BLE001 - a corrupt pair is exactly a reset reason
+                old_thumbprint = ""
+            os.replace(rotation.key_path, rotation.key_path.with_suffix(".pem.previous"))
+            os.replace(rotation.cert_path, rotation.cert_path.with_suffix(".pem.previous"))
+        new_key, new_cert = make_certificate(args.validity, args.key_bits, args.subject)
+        new_thumbprint = new_cert.fingerprint(hashes.SHA1()).hex().upper()
+        handle = os.open(rotation.key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(new_key.private_bytes(serialization.Encoding.PEM,
+                                               serialization.PrivateFormat.PKCS8,
+                                               serialization.NoEncryption()))
+        rotation.cert_path.write_bytes(new_cert.public_bytes(serialization.Encoding.PEM))
+        rotation.cert_path.chmod(0o644)
+        try:  # match the entrypoint's ownership posture where the account exists
+            import grp
+            import pwd
+            uid = pwd.getpwnam("postfix").pw_uid
+            gid = grp.getgrnam("postfix").gr_gid
+            os.chown(rotation.key_path, uid, gid)
+            os.chown(rotation.cert_path, uid, gid)
+        except (KeyError, PermissionError, ImportError):
+            pass
+        # Drop half-finished rotation/recovery bookkeeping; the credentials those
+        # referenced are gone now. Record the replaced thumbprint so --list-keys
+        # shows the old Entra key as this instance's own superseded certificate.
+        state = rotation.read_state()
+        for stale in ("pending_addition", "pending_removal", "recovery"):
+            state.pop(stale, None)
+        if old_thumbprint:
+            state["reset_replaced"] = {"thumbprint": old_thumbprint, "at": int(time.time())}
+        rotation.write_state(state)
+        rotation.log("reset", "ok",
+                     f"generated a fresh OAuth certificate {new_thumbprint}; upload required")
+        _cert_action(rotation, "require", "reset-fresh-certificate",
+                     new_thumbprint, str(rotation.cert_path))
+        print(new_thumbprint)
+        return 0
+
+    # --- non-destructive self-recovery ---------------------------------------
+    # Runs its own certificate load with failure handling, so it is dispatched
+    # before the strict load below.
+    if args.recover:
+        return run_recovery(rotation, env, args)
 
     recipient = args.to or env.get("MAIL_ROTATION_TEST_RECIPIENT") or env.get("MAIL_ADMIN_EMAIL")
 
@@ -573,40 +1007,85 @@ def main() -> int:
         pending_record = rotation.read_state().get("pending_removal") or {}
         pending_key_id = pending_record.get("key_id")
 
-        def classify(credential: dict) -> str:
-            if credential_thumbprint(credential) == live_thumbprint:
-                return "live"
-            if credential.get("keyId") == pending_key_id:
-                return "retiring"
-            return "orphan"
-
         credentials = app.get("keyCredentials", [])
         print(f"{len(credentials)} key credential(s) on {rotation.client_id}")
-        print(f"live certificate thumbprint {live_thumbprint}\n")
+        print(f"this instance  {rotation.instance_id or '(no MAIL_INSTANCE_ID set)'}")
+        print(f"live thumbprint {live_thumbprint}\n")
+        removable = []
+        seen_foreign = False
         for credential in credentials:
-            kind = classify(credential)
-            if kind == "live":
-                role = "LIVE      the certificate on disk, in use now"
-            elif kind == "retiring":
+            kind = classify_credential(credential, live_thumbprint,
+                                       rotation.instance_id, pending_key_id)
+            if kind == OWN_LIVE:
+                role = "LIVE        the certificate on disk, in use now"
+            elif kind == OWN_RETIRING:
                 age = (time.time() - pending_record.get("rotated_at", 0)) / 86400
-                role = f"RETIRING  scheduled, {args.grace_days - age:.1f} days left"
+                role = f"RETIRING    this instance, {args.grace_days - age:.1f} days left"
+            elif kind == OWN_SUPERSEDED:
+                role = "SUPERSEDED  this instance's old certificate -- safe to remove"
+                removable.append(credential.get("keyId"))
+            elif kind == OWN_FOREIGN:
+                role = "FOREIGN     ANOTHER instance's certificate -- not yours, do not remove"
+                seen_foreign = True
             else:
-                role = "ORPHAN    not live and not scheduled -- remove it"
+                role = "UNMONITORED ownership unknown (uploaded by hand) -- not removed automatically"
+                seen_foreign = True
             print(f"  {role}")
             print(f"    displayName {credential.get('displayName')}")
             print(f"    keyId       {credential.get('keyId')}")
             print(f"    identifier  {credential.get('customKeyIdentifier')}")
             print(f"    expires     {credential.get('endDateTime')}\n")
 
-        orphans = [c.get("keyId") for c in credentials if classify(c) == "orphan"]
-        if orphans:
-            print("Remove each orphan with:")
-            for key_id in orphans:
+        if removable:
+            print("Remove this instance's OWN superseded certificate(s) with:")
+            for key_id in removable:
                 print(f"  sudo python3 ./scripts/rotate-smtp-relay-cert.py --remove-key {key_id}")
+        else:
+            print("Nothing on this app registration is this instance's to remove.")
+        if seen_foreign:
+            print("FOREIGN/UNMONITORED certificates belong to other instances or were "
+                  "uploaded by hand.\nRemove them only from the instance that owns "
+                  "them; this tool will refuse to delete them.")
         return 0
 
     # --- read-only's counterpart: remove one key by id ------------------------
     if args.remove_key:
+        # Classify the target before touching it. A shared app registration may
+        # hold another instance's LIVE credential; deleting it stops that other
+        # relay a week later with nothing to explain it. This instance's own live
+        # certificate must be equally undeletable by hand. So removal is gated on
+        # ownership, and crossing an ownership boundary needs a deliberate,
+        # purpose-named override rather than the generic --force habit.
+        graph_token = rotation.token(f"{GRAPH}/.default", current_key, current_cert)
+        status, app = rotation.graph("GET", app_path, graph_token)
+        if status != 200 or not app:
+            print(f"Graph GET failed: HTTP {status}: {app}", file=sys.stderr)
+            return 1
+        live_thumbprint = current_cert.fingerprint(hashes.SHA1()).hex().upper()
+        pending_key_id = (rotation.read_state().get("pending_removal") or {}).get("key_id")
+        target = next((c for c in app.get("keyCredentials", [])
+                       if c.get("keyId") == args.remove_key), None)
+        if target is None:
+            rotation.log("remove-key-by-hand", "ok",
+                         f"{args.remove_key}: not present on the app registration")
+            return 0
+        kind = classify_credential(target, live_thumbprint, rotation.instance_id, pending_key_id)
+        if kind == OWN_LIVE:
+            rotation.log("remove-key-by-hand", "REFUSED",
+                         f"{args.remove_key} is this instance's LIVE certificate; refusing")
+            return 1
+        if kind == OWN_FOREIGN and not args.yes_remove_another_instances_cert:
+            owner = instance_id_of(target.get("displayName") or "") or "unknown"
+            rotation.log("remove-key-by-hand", "REFUSED",
+                         f"{args.remove_key} belongs to another instance ({owner}); refusing. "
+                         f"Remove it from that instance, or pass "
+                         f"--yes-remove-another-instances-cert to override.")
+            return 1
+        if kind == OWN_UNMONITORED and not (args.yes or args.yes_remove_another_instances_cert):
+            rotation.log("remove-key-by-hand", "REFUSED",
+                         f"{args.remove_key} has no instance-owner stamp (uploaded by hand); "
+                         f"pass --yes to confirm.")
+            return 1
         removed, note = remove_key(args.remove_key)
         rotation.log("remove-key-by-hand", "ok" if removed else "FAILED",
                      f"{args.remove_key}: {note}")
@@ -733,7 +1212,7 @@ def main() -> int:
                 "type": "AsymmetricX509Cert",
                 "usage": "Verify",
                 "key": base64.b64encode(new_cert.public_bytes(serialization.Encoding.DER)).decode(),
-                "displayName": f"the relay mail relay (rotated {datetime.date.today().isoformat()})",
+                "displayName": rotation_display_name(rotation.instance_id),
             },
             "passwordCredential": None,
             "proof": rotation.proof(current_key, current_cert),

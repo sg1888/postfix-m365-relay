@@ -460,7 +460,8 @@ class AlertIncidentTests(unittest.TestCase):
 
 class ListKeysReportTests(unittest.TestCase):
     """The `--list-keys` report classifies Microsoft's real keyCredentials
-    response into LIVE / RETIRING / ORPHAN and prints a removal hint per orphan.
+    response into LIVE / RETIRING / SUPERSEDED / FOREIGN / UNMONITORED and prints
+    a removal hint ONLY for this instance's own superseded certificates.
 
     The fixture at tests/fixtures/keycredentials.json is a redacted capture from a
     live Entra tenant whose customKeyIdentifier encoding (uppercase hex, not the
@@ -470,6 +471,8 @@ class ListKeysReportTests(unittest.TestCase):
     """
 
     FIXTURE = json.loads((ROOT / "tests/fixtures/keycredentials.json").read_text())
+    MY_INSTANCE = "11112222-3333-4444-5555-666677778888"
+    OTHER_INSTANCE = "99998888-7777-6666-5555-444433332222"
 
     def test_fixture_reflects_the_observed_graph_shape(self):
         credential = self.FIXTURE["value"][0]["keyCredentials"][0]
@@ -510,6 +513,7 @@ class ListKeysReportTests(unittest.TestCase):
                 "MAIL_RELAY_CERT_FILE": str(cert_path),
                 "MAIL_ROTATION_STATE_FILE": str(root / "state.json"),
                 "MAIL_ROTATION_LOG_FILE": str(root / "rotation.log"),
+                "MAIL_INSTANCE_ID": self.MY_INSTANCE,
             }
             app = {"keyCredentials": build_credentials(live_thumbprint)}
             with mock.patch.dict(os.environ, env, clear=False), \
@@ -524,11 +528,13 @@ class ListKeysReportTests(unittest.TestCase):
                     code = rotate.main()
             return code, buffer.getvalue(), live_thumbprint
 
-    def test_report_classifies_live_retiring_and_orphan(self):
+    def test_report_classifies_all_five_ownership_categories(self):
         template = self.FIXTURE["value"][0]["keyCredentials"][0]
         live_id = "33333333-3333-3333-3333-333333333333"
         retiring_id = "44444444-4444-4444-4444-444444444444"
-        orphan_id = "55555555-5555-5555-5555-555555555555"
+        superseded_id = "55555555-5555-5555-5555-555555555555"
+        foreign_id = "66666666-6666-6666-6666-666666666666"
+        unmonitored_id = "77777777-7777-7777-7777-777777777777"
 
         def build_credentials(live_thumbprint):
             # Live: customKeyIdentifier is the on-disk cert's thumbprint, in the
@@ -536,23 +542,31 @@ class ListKeysReportTests(unittest.TestCase):
             live = dict(template, customKeyIdentifier=live_thumbprint, keyId=live_id)
             retiring = dict(template, customKeyIdentifier="0" * 40,
                             keyId=retiring_id, displayName="previous")
-            orphan = dict(template, customKeyIdentifier="F" * 40,
-                          keyId=orphan_id, displayName="abandoned")
-            return [live, retiring, orphan]
+            # Superseded: not live/retiring, but stamped with MY instance id.
+            superseded = dict(template, customKeyIdentifier="A" * 40, keyId=superseded_id,
+                              displayName=rotate.rotation_display_name(self.MY_INSTANCE))
+            # Foreign: stamped with ANOTHER instance's id -- never mine to remove.
+            foreign = dict(template, customKeyIdentifier="B" * 40, keyId=foreign_id,
+                           displayName=rotate.rotation_display_name(self.OTHER_INSTANCE))
+            # Unmonitored: uploaded by hand, no owner stamp at all.
+            unmonitored = dict(template, customKeyIdentifier="C" * 40,
+                               keyId=unmonitored_id, displayName="uploaded-by-hand")
+            return [live, retiring, superseded, foreign, unmonitored]
 
         pending = {"key_id": retiring_id, "rotated_at": alert.time.time()}
         code, report, live_thumbprint = self._render_report(build_credentials, pending)
 
         self.assertEqual(code, 0)
-        self.assertIn("3 key credential(s)", report)
+        self.assertIn("5 key credential(s)", report)
         self.assertIn(live_thumbprint, report)
-        self.assertIn("LIVE", report)
-        self.assertIn("RETIRING", report)
-        self.assertIn("ORPHAN", report)
-        # Only the orphan earns a removal hint; the live and retiring keys never do.
-        self.assertIn(f"--remove-key {orphan_id}", report)
-        self.assertNotIn(f"--remove-key {retiring_id}", report)
-        self.assertNotIn(f"--remove-key {live_id}", report)
+        for label in ("LIVE", "RETIRING", "SUPERSEDED", "FOREIGN", "UNMONITORED"):
+            self.assertIn(label, report)
+        # The mislabel that invited a sibling's deletion must never reappear.
+        self.assertNotIn("ORPHAN", report)
+        # ONLY this instance's superseded certificate earns a removal hint.
+        self.assertIn(f"--remove-key {superseded_id}", report)
+        for protected in (live_id, retiring_id, foreign_id, unmonitored_id):
+            self.assertNotIn(f"--remove-key {protected}", report)
 
 
 class RemoveKeyAlreadyGoneTests(unittest.TestCase):
@@ -657,6 +671,308 @@ class AddKeyResponseTests(unittest.TestCase):
         start = self.RESPONSE["startDateTime"][:4]
         end = self.RESPONSE["endDateTime"][:4]
         self.assertGreaterEqual(int(end) - int(start), 10)  # ~10-year span accepted
+
+
+class InstanceIdentityTests(unittest.TestCase):
+    """Every certificate this instance registers carries a stable owner stamp in
+    its displayName; ownership is read back from that stamp. A shared app
+    registration therefore never confuses one instance's certificate for
+    another's."""
+
+    def test_display_name_carries_the_instance_stamp(self):
+        name = rotate.rotation_display_name("abc-123")
+        self.assertIn("inst:abc-123", name)
+        self.assertEqual(rotate.instance_id_of(name), "abc-123")
+
+    def test_absent_instance_id_leaves_no_stamp(self):
+        name = rotate.rotation_display_name("")
+        self.assertNotIn("inst:", name)
+        self.assertEqual(rotate.instance_id_of(name), "")
+
+    def test_unstamped_display_name_parses_to_empty(self):
+        self.assertEqual(rotate.instance_id_of("uploaded by an administrator"), "")
+        self.assertEqual(rotate.instance_id_of(""), "")
+
+
+class ClassifyCredentialTests(unittest.TestCase):
+    """classify_credential decides what may be removed; anything not provably
+    this instance's own must be FOREIGN or UNMONITORED, never removable."""
+
+    MINE = "mine-0001"
+    OTHER = "other-0002"
+    LIVE = "AA" * 20
+
+    def cred(self, thumb="00" * 20, key_id="k", display=""):
+        return {"customKeyIdentifier": thumb, "keyId": key_id, "displayName": display}
+
+    def test_live_is_recognised_by_thumbprint_regardless_of_stamp(self):
+        # Even an unstamped, human-uploaded certificate is LIVE when it is the one
+        # on disk -- the in-use credential is always recognised as ours.
+        c = self.cred(thumb=self.LIVE, display="uploaded-by-hand")
+        self.assertEqual(rotate.classify_credential(c, self.LIVE, self.MINE, None), rotate.OWN_LIVE)
+
+    def test_retiring_is_the_scheduled_key(self):
+        c = self.cred(key_id="retire-me")
+        self.assertEqual(
+            rotate.classify_credential(c, self.LIVE, self.MINE, "retire-me"), rotate.OWN_RETIRING)
+
+    def test_my_stamp_is_superseded(self):
+        c = self.cred(display=rotate.rotation_display_name(self.MINE))
+        self.assertEqual(rotate.classify_credential(c, self.LIVE, self.MINE, None), rotate.OWN_SUPERSEDED)
+
+    def test_other_stamp_is_foreign(self):
+        c = self.cred(display=rotate.rotation_display_name(self.OTHER))
+        self.assertEqual(rotate.classify_credential(c, self.LIVE, self.MINE, None), rotate.OWN_FOREIGN)
+
+    def test_unstamped_is_unmonitored(self):
+        c = self.cred(display="uploaded-by-hand")
+        self.assertEqual(rotate.classify_credential(c, self.LIVE, self.MINE, None), rotate.OWN_UNMONITORED)
+
+    def test_stamped_but_no_local_identity_is_unmonitored(self):
+        # With no MAIL_INSTANCE_ID this instance cannot claim ownership; a stamped
+        # certificate must stay hands-off rather than be assumed ours.
+        c = self.cred(display=rotate.rotation_display_name(self.OTHER))
+        self.assertEqual(rotate.classify_credential(c, self.LIVE, "", None), rotate.OWN_UNMONITORED)
+
+
+class TokenFailureClassifierTests(unittest.TestCase):
+    """Recovery acts only on a DEFINITIVE certificate fault. Transient outages and
+    Exchange-role faults must never be mistaken for one."""
+
+    def test_no_status_is_transient(self):
+        self.assertEqual(rotate.classify_token_failure(None, "connection timed out"), "transient")
+
+    def test_server_error_is_transient(self):
+        self.assertEqual(rotate.classify_token_failure(503, "service unavailable"), "transient")
+
+    def test_aadsts700027_is_cert_fault(self):
+        body = '{"error":"invalid_client","error_description":"AADSTS700027: certificate ... not found"}'
+        self.assertEqual(rotate.classify_token_failure(401, body), "cert-fault")
+
+    def test_certificate_not_valid_is_cert_fault(self):
+        self.assertEqual(
+            rotate.classify_token_failure(401, "the certificate is not valid"), "cert-fault")
+
+    def test_certificate_expired_is_cert_fault(self):
+        self.assertEqual(
+            rotate.classify_token_failure(401, "certificate has expired"), "cert-fault")
+
+    def test_resource_principal_is_scope(self):
+        self.assertEqual(
+            rotate.classify_token_failure(401, "resource principal not found"), "scope")
+
+    def test_sendasapp_is_scope(self):
+        self.assertEqual(
+            rotate.classify_token_failure(403, "the SMTP.SendAsApp role is missing"), "scope")
+
+    def test_generic_400_is_unknown(self):
+        # A 4xx that matches nothing must NOT be treated as a certificate fault;
+        # recovery must never regenerate on a guess.
+        self.assertEqual(
+            rotate.classify_token_failure(400, "AADSTS9000: some other problem"), "unknown")
+
+
+def _make_rotation(root, env_extra=None):
+    """Build a Rotation with a real, loadable key/cert pair in a secrets/ dir."""
+    from cryptography.hazmat.primitives import serialization
+
+    secrets = root / "secrets"
+    secrets.mkdir(exist_ok=True)
+    key_path = secrets / "mail_relay_client_key.pem"
+    cert_path = secrets / "mail_relay_client_cert.pem"
+    key, cert = rotate.make_certificate(3650, 2048, "Mail Relay")
+    key_path.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()))
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    env = {
+        "MAIL_RELAY_TENANT": "00000000-0000-0000-0000-000000000000",
+        "MAIL_RELAY_CLIENT_ID": "11111111-1111-1111-1111-111111111111",
+        "MAIL_SEND_MAILBOX": "relay@example.invalid",
+        "MAIL_RELAY_KEY_FILE": str(key_path),
+        "MAIL_RELAY_CERT_FILE": str(cert_path),
+        "MAIL_ROTATION_STATE_FILE": str(root / "state.json"),
+        "MAIL_ROTATION_LOG_FILE": str(root / "rotation.log"),
+        "MAIL_INSTANCE_ID": "my-instance",
+    }
+    env.update(env_extra or {})
+    rotation = rotate.Rotation(root, env, Path(env["MAIL_ROTATION_LOG_FILE"]), dry_run=False)
+    return rotation, env, key_path, cert_path
+
+
+def _args(**overrides):
+    import types
+    base = dict(to=None, env_file="/nonexistent.env", validity=730, key_bits=2048,
+                subject="postfix-m365-relay")
+    base.update(overrides)
+    return types.SimpleNamespace(**base)
+
+
+class ResetGeneratesFreshCertificateTests(unittest.TestCase):
+    """--reset replaces the live pair with a brand new one, keeps the old as
+    .previous, and raises the upload notice. It must work even with no network."""
+
+    def test_reset_requires_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _make_rotation(root)
+            env = {"MAIL_RELAY_TENANT": "t", "MAIL_RELAY_CLIENT_ID": "c",
+                   "MAIL_SEND_MAILBOX": "m",
+                   "MAIL_RELAY_KEY_FILE": str(root / "secrets/mail_relay_client_key.pem"),
+                   "MAIL_RELAY_CERT_FILE": str(root / "secrets/mail_relay_client_cert.pem"),
+                   "MAIL_ROTATION_STATE_FILE": str(root / "state.json"),
+                   "MAIL_ROTATION_LOG_FILE": str(root / "rotation.log")}
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch.object(sys, "argv", ["rotate", "--reset"]), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(rotate.main(), 1)  # refused without --yes
+
+    def test_reset_regenerates_and_preserves_previous(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, env, key_path, cert_path = _make_rotation(root)
+            before = cert_path.read_bytes()
+            argv = ["rotate", "--reset", "--yes", "--env-file", str(root / "absent.env")]
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch.object(rotate, "_cert_action") as action, \
+                    mock.patch.object(sys, "argv", argv):
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    code = rotate.main()
+            self.assertEqual(code, 0)
+            self.assertNotEqual(cert_path.read_bytes(), before)      # fresh certificate
+            self.assertTrue(key_path.with_suffix(".pem.previous").exists())
+            self.assertTrue(cert_path.with_suffix(".pem.previous").exists())
+            # cert-action.sh require was invoked to raise the repeated notice.
+            self.assertTrue(any("require" in c.args and
+                                 "reset-fresh-certificate" in c.args
+                                 for c in action.call_args_list))
+
+
+class RemoveKeyGuardTests(unittest.TestCase):
+    """--remove-key refuses to delete another instance's certificate or this
+    instance's own live certificate; only an owned superseded key is removable."""
+
+    def _run_remove(self, target_display, target_thumb, live_is_target=False):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rotation, env, _key, cert_path = _make_rotation(root)
+            from cryptography.hazmat.primitives import hashes
+            from cryptography import x509
+            live_thumb = x509.load_pem_x509_certificate(cert_path.read_bytes()) \
+                .fingerprint(hashes.SHA1()).hex().upper()
+            target_id = "abcdefab-1234-1234-1234-abcdefabcdef"
+            thumb = live_thumb if live_is_target else target_thumb
+            app = {"keyCredentials": [{"keyId": target_id, "customKeyIdentifier": thumb,
+                                       "displayName": target_display}]}
+            argv = ["rotate", "--remove-key", target_id, "--env-file", str(root / "absent.env")]
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch.object(rotate.Rotation, "token", return_value="fake"), \
+                    mock.patch.object(rotate.Rotation, "graph", return_value=(200, app)), \
+                    mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(rotate, "_cert_action"):
+                # remove_key is defined inside main(); patch the underlying graph
+                # call it would make so a *permitted* removal reports success.
+                code = rotate.main()
+            return code
+
+    def test_foreign_certificate_is_refused(self):
+        code = self._run_remove(
+            rotate.rotation_display_name("someone-else"), "BB" * 20)
+        self.assertEqual(code, 1)
+
+    def test_live_certificate_is_refused(self):
+        code = self._run_remove("uploaded-by-hand", "CC" * 20, live_is_target=True)
+        self.assertEqual(code, 1)
+
+
+class RecoveryStateMachineTests(unittest.TestCase):
+    """The safety-critical branches of run_recovery. The invariant under test:
+    the live certificate is never sacrificed to a transient fault, and a standby
+    is only generated on a definitive, sustained certificate fault."""
+
+    def test_healthy_shortcut_does_no_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rotation, env, _k, _c = _make_rotation(root)
+            with mock.patch.object(rotate, "_token_is_fresh", return_value=True), \
+                    mock.patch.object(rotate, "_try_mint") as mint:
+                self.assertEqual(rotate.run_recovery(rotation, env, _args()), 0)
+            mint.assert_not_called()
+
+    def test_transient_fault_does_not_advance_streak_or_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rotation, env, _k, _c = _make_rotation(root)
+            with mock.patch.object(rotate, "_token_is_fresh", return_value=False), \
+                    mock.patch.object(rotate, "_try_mint", return_value=(False, None, "timeout")):
+                self.assertEqual(rotate.run_recovery(rotation, env, _args()), 0)
+            self.assertNotIn("cert_fault_streak", rotation.read_state())
+            self.assertFalse(rotate._recovery_paths(rotation)[1].exists())
+
+    def test_definitive_fault_below_threshold_waits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rotation, env, _k, _c = _make_rotation(root)
+            body = "AADSTS700027 certificate not found"
+            with mock.patch.object(rotate, "_token_is_fresh", return_value=False), \
+                    mock.patch.object(rotate, "_try_mint", return_value=(False, 401, body)), \
+                    mock.patch.object(rotate, "_cert_action"):
+                self.assertEqual(rotate.run_recovery(rotation, env, _args()), 0)
+            self.assertEqual(rotation.read_state().get("cert_fault_streak"), 1)
+            self.assertFalse(rotate._recovery_paths(rotation)[1].exists())  # no standby yet
+
+    def test_sustained_definitive_fault_generates_one_standby(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rotation, env, _k, _c = _make_rotation(
+                root, {"MAIL_CERT_RECOVERY_FAULT_STREAK": "2",
+                       "MAIL_CERT_RECOVERY_AFTER_SECONDS": "0"})
+            rotation.write_state({"cert_fault_streak": 1,
+                                  "cert_fault_since": int(alert.time.time()) - 10})
+            body = "AADSTS700027 certificate not found"
+            with mock.patch.object(rotate, "_token_is_fresh", return_value=False), \
+                    mock.patch.object(rotate, "_try_mint", return_value=(False, 401, body)), \
+                    mock.patch.object(rotate, "_cert_action") as action:
+                self.assertEqual(rotate.run_recovery(rotation, env, _args()), 0)
+            state = rotation.read_state()
+            self.assertIn("recovery", state)
+            staging_key, staging_cert = rotate._recovery_paths(rotation)
+            self.assertTrue(staging_key.exists() and staging_cert.exists())
+            # The upload notice was raised for the standby.
+            self.assertTrue(any("require" in c.args and
+                                 "recovery-standby-awaiting-upload" in c.args
+                                 for c in action.call_args_list))
+
+    def test_original_certificate_recovering_discards_the_standby(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rotation, env, _k, _c = _make_rotation(root)
+            # Pretend a standby is already staged and recorded.
+            staging_key, staging_cert = rotate._recovery_paths(rotation)
+            staging_key.write_text("staged-key")
+            staging_cert.write_text("staged-cert")
+            rotation.write_state({"recovery": {"thumbprint": "DEAD", "generated_at": 1},
+                                  "cert_fault_streak": 9})
+            with mock.patch.object(rotate, "_try_mint", return_value=(True, 200, "")), \
+                    mock.patch.object(rotate, "_cert_action") as action:
+                self.assertEqual(rotate.run_recovery(rotation, env, _args()), 0)
+            # The working original is kept; the standby and its notice are gone.
+            self.assertFalse(staging_key.exists())
+            self.assertFalse(staging_cert.exists())
+            self.assertNotIn("recovery", rotation.read_state())
+            self.assertTrue(any("clear" in c.args for c in action.call_args_list))
+
+    def test_scope_fault_never_generates_a_certificate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rotation, env, _k, _c = _make_rotation(root)
+            with mock.patch.object(rotate, "_token_is_fresh", return_value=False), \
+                    mock.patch.object(rotate, "_try_mint",
+                                      return_value=(False, 403, "resource principal not found")):
+                self.assertEqual(rotate.run_recovery(rotation, env, _args()), 0)
+            self.assertFalse(rotate._recovery_paths(rotation)[1].exists())
+            self.assertNotIn("cert_fault_streak", rotation.read_state())
 
 
 if __name__ == "__main__":

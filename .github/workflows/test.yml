@@ -7,6 +7,15 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Host-side unit tests for the pure shell helpers (lib/text.sh). Container-free
+  # and distro-independent, so they run as a fast standalone job.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell unit tests (bats)
+        run: ./tests/bats-unit.sh
+
   container:
     runs-on: ubuntu-latest
     # Both base images are gated on every change. The runner is native amd64, so
@@ -18,9 +27,9 @@ jobs:
       matrix:
         include:
           - variant: ubuntu
-            file: build/postfix-m365-relay/Dockerfile.ubuntu
+            base: ubuntu:24.04
           - variant: alma
-            file: build/postfix-m365-relay/Dockerfile
+            base: almalinux:10
     steps:
       - uses: actions/checkout@v4
 
@@ -39,7 +48,9 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.file }}
+          file: build/postfix-m365-relay/Dockerfile
+          build-args: |
+            BASE_IMAGE=${{ matrix.base }}
           platforms: linux/amd64
           load: true
           tags: postfix-m365-relay:test

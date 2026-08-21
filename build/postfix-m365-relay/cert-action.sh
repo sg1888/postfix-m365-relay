@@ -29,10 +29,12 @@ EXPORT_THUMB=$CONFIG_DIR/microsoft365-app-cert-thumbprint.txt
 
 log() { printf '%s cert-action: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
-# A controlled slug only: require callers pass a reason with no whitespace or
-# shell metacharacters, so the KEY=VALUE state file stays trivially parseable and
-# no caller detail can smuggle a newline into it.
-valid_reason() { [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]; }
+# valid_reason (controlled lowercase slug) is a pure helper shared with
+# render-config.sh and unit-tested in tests/unit/text.bats. lib/ sits beside this
+# script in both the repo and the image.
+_relay_lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib
+# shellcheck source=lib/text.sh
+. "$_relay_lib/text.sh"
 
 publish_export() {
   local cert=$1 thumbprint=$2 owner

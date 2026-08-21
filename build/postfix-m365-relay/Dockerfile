@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.6
 # Postfix with XOAUTH2, for relaying to Microsoft 365 on an app-only OAuth token.
 #
 # Why this exists at all: Microsoft is retiring basic authentication for SMTP
@@ -5,15 +6,19 @@
 # behavior this relay needs. SMTP AUTH with an OAuth token preserves configured
 # application display names; regression tests cover that behavior.
 #
-# AlmaLinux rather than Fedora or Alpine, decided by where the plugin is
-# packaged and how long the base is supported:
-#   - Alpine has no sasl-xoauth2 at all (checked: edge, 3.22, 3.21), so it would
-#     mean compiling from a pinned commit, which is the standing maintenance
-#     obligation this project rejected the pass-through plugin over.
-#   - EPEL 9 froze at sasl-xoauth2 0.24 while upstream is 0.27.
-#   - EPEL 10 ships 0.27, and AlmaLinux 10 is supported to 2035.
-# The normal amd64 build uses x86-64-v3. CI also publishes an explicit
-# linux/amd64/v2 variant from AlmaLinux's official 10-base manifest.
+# ONE Dockerfile, two base distros, chosen by BASE_IMAGE:
+#   - almalinux:10          x86-64-v3 baseline (needs AVX2); EPEL ships
+#                           sasl-xoauth2 0.27, and AlmaLinux 10 is supported to
+#                           2035. An x86-64-v2 rebuild is published from
+#                           almalinux/10-base (SSE4.2), guarded by
+#                           EXPECT_ALMALINUX_ARCH.
+#   - ubuntu:24.04          x86-64 v1 baseline, so one amd64 image runs on every
+#                           x86-64 CPU (including default-CPU VMs). sasl-xoauth2
+#                           is not in Debian stable; obtained via the checksum-
+#                           pinned vendored .deb by default (see SXO_SOURCE).
+# The per-distro package install, sasl-xoauth2 sourcing, and sasl config seeding
+# live in build-scripts/postfix-install.sh, dispatched by the package manager
+# present. Runtime scripts are already distro-aware.
 #
 # Image update policy:
 #   - the base tag is pinned; --pull refreshes patches inside it
@@ -23,62 +28,29 @@
 # libraries while looking like it did something.
 ARG BASE_IMAGE=almalinux:10
 FROM ${BASE_IMAGE}
+
+# almalinux (v2 build) arch guard; empty for the normal v3 and Ubuntu builds.
 ARG EXPECT_ALMALINUX_ARCH=
+# Ubuntu sasl-xoauth2 sourcing: vendored (default) | ppa | source. Ignored on Alma.
+ARG SXO_SOURCE=vendored
+# Upstream release tag used by SXO_SOURCE=source. Matches the vendored version.
+ARG SXO_SOURCE_REF=release-0.27
+# buildx populates TARGETARCH automatically (amd64 | arm64).
+ARG TARGETARCH
 
-# EPEL provides sasl-xoauth2. cyrus-sasl-plain is needed even though we never
-# use PLAIN: the SASL client library will not offer a mechanism list without at
-# least one conventional plugin present.
-#
-# Alma's x86-64-v2 image is slightly unusual: RPM reports the CPU as x86_64,
-# while `almalinux-release` itself has architecture x86_64_v2.  Therefore we
-# identify the image from that package instead of `uname` or `%{_arch}`.  The
-# v2 rebuild of EPEL has its own release package, signing key, and repository;
-# using Fedora's ordinary EPEL release RPM silently installs x86_64 (v3-baseline
-# on EL10) packages.  We did exactly that in the first v2 build attempt and the
-# build succeeded far enough to hide the compatibility error.  The conditional
-# and the final RPM assertions below turn that observed failure into a hard,
-# auditable build invariant.
-RUN if [ -n "$EXPECT_ALMALINUX_ARCH" ]; then \
-      test "$(rpm -q --qf '%{ARCH}' almalinux-release)" = "$EXPECT_ALMALINUX_ARCH"; \
-    fi \
- && dnf -y upgrade \
- && if rpm -q --qf '%{ARCH}' almalinux-release | grep -qx x86_64_v2; then \
-      dnf -y install --setopt=install_weak_deps=False \
-        https://epel.repo.almalinux.org/10z/x86_64_v2/Packages/epel-release-almalinux-altarch-10-6.el10.alma_altarch.noarch.rpm; \
-    else \
-      dnf -y install --setopt=install_weak_deps=False \
-        https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm; \
-    fi \
- && dnf -y install --setopt=install_weak_deps=False \
-      postfix cyrus-sasl cyrus-sasl-plain sasl-xoauth2 ca-certificates \
-      python3 python3-cryptography openssl curl nmap-ncat iproute tzdata \
- && dnf clean all \
- && rm -rf /var/cache/dnf \
- && rpm -q sasl-xoauth2 | grep -q '^sasl-xoauth2-0\.27' \
- && if rpm -q --qf '%{ARCH}' almalinux-release | grep -qx x86_64_v2; then \
-      test "$(rpm -q --qf '%{ARCH}' sasl-xoauth2)" = x86_64_v2 \
-      && rpm -q --qf '%{RELEASE}' sasl-xoauth2 | grep -q '\.alma_altarch'; \
-    fi \
- && python3 -c 'import cryptography' \
- && command -v saslpasswd2 >/dev/null \
- && test -d /usr/lib64/sasl2
+# Install packages, source the sasl-xoauth2 plugin, and seed sasl/postfix config.
+# The script and the vendored .deb set are bind-mounted (not COPYed) so they
+# never land in an image layer.
+RUN --mount=type=bind,source=build/postfix-m365-relay/build-scripts,target=/build-scripts \
+    --mount=type=bind,source=vendor/sasl-xoauth2,target=/vendor-sasl-xoauth2 \
+    EXPECT_ALMALINUX_ARCH="$EXPECT_ALMALINUX_ARCH" \
+    SXO_SOURCE="$SXO_SOURCE" SXO_SOURCE_REF="$SXO_SOURCE_REF" \
+    TARGETARCH="$TARGETARCH" \
+    sh /build-scripts/postfix-install.sh
 
-# A documented hardened deployment makes /etc/postfix tmpfs. Keep the package's
-# defaults somewhere durable so both normal and read-only boots can restore them.
-RUN cp -a /etc/postfix /usr/share/postfix-defaults \
- && install -d -m 0755 /etc/sasl2 /usr/local/libexec/mail-relay \
-      /usr/share/postfix-m365-relay /config \
- && printf '%s\n' \
-      'pwcheck_method: auxprop' \
-      'auxprop_plugin: sasldb' \
-      'sasldb_path: /run/mail-relay/sasldb2' \
-      'mech_list: PLAIN LOGIN' \
-      > /etc/sasl2/smtpd.conf \
- && printf '%s\n' \
-      '{"client_id":"unused-app-only-flow","client_secret":"","token_endpoint":"http://127.0.0.1:9/sasl-xoauth2-must-not-refresh","always_log_to_syslog":"no","log_to_syslog_on_failure":"yes","log_full_trace_on_failure":"no"}' \
-      > /etc/sasl-xoauth2.conf \
- && ln -s /run/mail-relay/log /var/log/mail-relay
-
+# One COPY list for both distros: any new runtime file is added here once and
+# ships in every variant. (A duplicated per-distro COPY list is exactly how a
+# runtime script once went missing from one image only.)
 COPY build/postfix-m365-relay/entrypoint.sh build/postfix-m365-relay/relay-supervisor.sh \
      build/postfix-m365-relay/relay-users build/postfix-m365-relay/relay-admin \
      build/postfix-m365-relay/export-cert /usr/local/bin/
@@ -88,6 +60,10 @@ COPY build/postfix-m365-relay/render-config.sh build/postfix-m365-relay/verify-r
      scripts/alert-event.py \
      scripts/refresh-smtp-token.py \
      scripts/rotate-smtp-relay-cert.py /usr/local/libexec/mail-relay/
+# Pure shell helpers sourced by render-config.sh / cert-action.sh. Kept in a lib/
+# subdir beside them (same relative path in repo and image) and unit-tested by
+# tests/unit/text.bats.
+COPY build/postfix-m365-relay/lib/text.sh /usr/local/libexec/mail-relay/lib/text.sh
 COPY mail-relay.conf.example /usr/share/postfix-m365-relay/mail-relay.conf.example
 RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/relay-supervisor.sh \
       /usr/local/bin/relay-users /usr/local/bin/relay-admin /usr/local/bin/export-cert \

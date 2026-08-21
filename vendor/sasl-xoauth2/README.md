@@ -2,8 +2,9 @@
 
 These are **upstream-built** `.deb` packages for
 [`sasl-xoauth2`](https://github.com/tarickb/sasl-xoauth2), committed here so the
-Ubuntu image build (`build/postfix-m365-relay/Dockerfile.ubuntu`, default
-`SXO_SOURCE=vendored`) never depends on a third-party server being online.
+Ubuntu image build (`build/postfix-m365-relay/Dockerfile` with
+`--build-arg BASE_IMAGE=ubuntu:24.04`, default `SXO_SOURCE=vendored`) never
+depends on a third-party server being online.
 
 They are **not compiled by us** — they are the exact artifacts the maintainer
 published to the Launchpad PPA `ppa:sasl-xoauth2/stable`. Vendoring them protects

@@ -53,6 +53,8 @@ jobs:
         run: ./tests/python-unit.sh postfix-m365-relay:test
       - name: Sender-name and regexp-map tests
         run: ./tests/container-sender-names.sh postfix-m365-relay:test
+      - name: Optional-sender and sender-allowlist tests
+        run: ./tests/container-optional-sender.sh postfix-m365-relay:test
       - name: Real Postfix-to-XOAUTH2 sink integration
         run: ./tests/container-end-to-end.sh postfix-m365-relay:test
       # This separate drill removes and recreates the relay around an actually

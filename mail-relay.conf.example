@@ -72,7 +72,7 @@ MAIL_RELAY_DOMAIN=relay.example.local
 #### clients use to reach the relay; opportunistic-TLS clients ignore it.
 MAIL_RELAY_HOSTNAME=postfix-m365-relay.relay.example.local
 
-#### Verify security for upstream certs. 
+#### Verify security for upstream certs.
 #### secure verifies Microsoft's certificate; encrypt is compatibility-only.
 MAIL_UPSTREAM_TLS_SECURITY_LEVEL=secure
 
@@ -96,7 +96,7 @@ MAIL_CERT_VALIDITY_DAYS=730
 #### The number of days after which the certificate will be renewed.  Blank means half of MAX_CERT_VALIDITY_DAYS.
 MAIL_CERT_RENEW_AT_DAYS=
 
-#### The number of days to wait before deleting expired or old certificates.  
+#### The number of days to wait before deleting expired or old certificates.
 MAIL_CERT_GRACE_DAYS=7
 
 #### Optional BYO first certificate; both are copied into the state volume at boot.

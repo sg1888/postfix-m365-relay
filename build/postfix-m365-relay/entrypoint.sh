@@ -381,6 +381,24 @@ if [[ $auth_enabled == yes ]]; then
   log "loaded $count device credential(s) into ephemeral sasldb2"
 fi
 
+# Self-heal ownership drift when the spool or state volume was first created by a
+# different base image: AlmaLinux postfix is uid 89, Ubuntu postfix is uid 100.
+# postfix commands that scan the queue (`postfix check`, run by render-config
+# below, and postsuper at start) drop to mail_owner first, so a queue directory
+# left owned by the other image's uid is unreadable and aborts the whole relay
+# ("scan_dir_push: open directory defer: Permission denied"). The state OAuth key
+# (mode 0600) is likewise unreadable across the drift. Re-own the mail-owned
+# queue directories and the state secrets to this image's postfix user BEFORE the
+# first postfix command touches the queue. Cheap and idempotent when the volume
+# already matches; set-permissions further below normalises groups/modes.
+mail_owner=$(postconf -h mail_owner 2>/dev/null || echo postfix)
+if [[ -d /var/spool/postfix ]]; then
+  for _q in incoming active bounce corrupt defer deferred hold flush saved trace maildrop public private; do
+    [[ -e /var/spool/postfix/$_q ]] && chown -R "$mail_owner" "/var/spool/postfix/$_q" 2>/dev/null || true
+  done
+fi
+[[ -d $STATE_DIR/secrets ]] && chown -R postfix:postfix "$STATE_DIR/secrets" 2>/dev/null || true
+
 # Rendering happens only after credentials and TLS paths are known. master.cf
 # is then narrowed to one unprivileged port: the package's port-25 listener is
 # removed so EXPOSE and actual listening behaviour cannot diverge.

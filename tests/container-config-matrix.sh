@@ -146,9 +146,19 @@ PY
 echo 'ok device password preserves embedded colons'
 # The same banner healthcheck remains valid when TLS is required: SMTP sends its
 # 220 greeting before STARTTLS, so health monitoring needs no certificate trust.
-docker exec "$container" bash -c \
-  "printf 'QUIT\\r\\n' | nc -w 3 127.0.0.1 2525 | grep -q '^220 '"
+health_command="{ sleep 1; printf 'QUIT\\r\\n'; } | nc -w 3 127.0.0.1 2525 | grep -q '^220 '"
+docker exec "$container" bash -c "$health_command"
 echo 'ok banner healthcheck passes with mandatory inbound TLS'
+# The healthcheck waits for the greeting. Postfix logs "improper command
+# pipelining after CONNECT" for a client that talks first, so an eager QUIT
+# would add one warning per check. Several runs: the race is per connection.
+for _ in 1 2 3; do docker exec "$container" bash -c "$health_command"; done
+sleep 3
+if docker logs "$container" 2>&1 | grep -Fq 'improper command pipelining'; then
+  echo 'healthcheck sent QUIT before the 220 greeting' >&2
+  exit 1
+fi
+echo 'ok banner healthcheck waits for the greeting'
 
 # Credentials are rebuilt from the mounted source on restart. Remove one line
 # in place (so the bind mount sees the update), recreate the same mode, and

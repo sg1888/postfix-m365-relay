@@ -476,7 +476,7 @@ and does not care about yours.
 # In Docker-only mode this should print NOTHING:
 docker port postfix-m365-relay
 # The container answers with a 220 banner on its own port:
-docker exec postfix-m365-relay sh -c "printf 'QUIT\r\n' | nc -w3 127.0.0.1 2525"
+docker exec postfix-m365-relay sh -c "{ sleep 1; printf 'QUIT\r\n'; } | nc -w3 127.0.0.1 2525"
 ```
 
 **2. Send a real test message and follow it to the recipient.** The bundled

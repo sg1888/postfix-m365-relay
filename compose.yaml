@@ -43,7 +43,10 @@ services:
         aliases: [postfix-m365-relay]
 
     healthcheck:
-      test: ["CMD-SHELL", "printf 'QUIT\\r\\n' | nc -w 3 127.0.0.1 $${RELAY_PORT:-2525} | grep -q '^220 '"]
+      # Wait for the 220 greeting before QUIT. Postfix logs "improper command
+      # pipelining after CONNECT" for a client that talks first (a spam-bot
+      # signature), so an eager QUIT would log one warning per check.
+      test: ["CMD-SHELL", "{ sleep 1; printf 'QUIT\\r\\n'; } | nc -w 3 127.0.0.1 $${RELAY_PORT:-2525} | grep -q '^220 '"]
       interval: 60s
       timeout: 10s
       retries: 3

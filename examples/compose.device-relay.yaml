@@ -34,7 +34,7 @@ services:
       mail-relay:
         aliases: [postfix-m365-relay]
     healthcheck:
-      test: ["CMD-SHELL", "printf 'QUIT\\r\\n' | nc -w 3 127.0.0.1 $${RELAY_PORT:-2525} | grep -q '^220 '"]
+      test: ["CMD-SHELL", "{ sleep 1; printf 'QUIT\\r\\n'; } | nc -w 3 127.0.0.1 $${RELAY_PORT:-2525} | grep -q '^220 '"]
       interval: 60s
       timeout: 10s
       retries: 3

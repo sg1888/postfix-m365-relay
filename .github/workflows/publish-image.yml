@@ -72,6 +72,20 @@ jobs:
           sha=$(git rev-list -n1 "$last")
           v=${last#v}
 
+          # A refresh rebuilds the release's own source. Releases older than the
+          # package upgrade in the build cannot pick up updates, so refreshing
+          # one would re-release the same packages every day. Skip until a
+          # manual release (scripts/release.sh) contains it.
+          if ! git show "$sha:build/postfix-m365-relay/build-scripts/postfix-install.sh" | grep -q packages-refreshed; then
+            {
+              echo "publish=false"; echo "version=$last"; echo "sha=$sha"
+              echo "stable=true"; echo "create_tag=false"; echo "base_version=$last"
+            } >> "$GITHUB_OUTPUT"
+            echo "::notice::$last predates automatic package refreshes; cut a release with scripts/release.sh first."
+            echo "$last predates automatic package refreshes; nothing to do until a newer release exists." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           : > updates.txt
           for variant in "$v linux/amd64" "$v-alma-v3 linux/amd64" "$v-alma-v2 linux/amd64/v2"; do
             read -r tag platform <<< "$variant"

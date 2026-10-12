@@ -374,11 +374,17 @@ regardless of this setting and never send mail.
   patched images, restart onto the reviewed digest, keep state/spool volumes,
   and monitor rotation alerts and health checks.
 
-The verifier opens one durable incident when the CA bundle exceeds 90 days;
-repeated checks update it without duplicates. A tested image replacement clears
-it with the same reference and elapsed duration. This doesn't mutate running
-images. Raise the threshold only if your org has a different documented patch
-cadence.
+The verifier opens one durable incident (`ca-bundle-age`) when the image's
+distro packages, CA bundle included, were refreshed more than
+`MAIL_CA_BUNDLE_MAX_AGE_DAYS` (default 90) days ago. The age comes from
+`/usr/share/postfix-m365-relay/packages-refreshed`, stamped by the build in the
+same layer as the package upgrade, not from the `ca-certificates` package date
+(distros can rightly ship one bundle for months). Published images are
+refreshed whenever a key or security update is pending (docs/RELEASING.md), so
+the incident means your container hasn't moved to a newer image. Repeated
+checks update it without duplicates. A tested image replacement clears it with
+the same reference and elapsed duration. This doesn't mutate running images.
+Raise the threshold only if your org has a different documented patch cadence.
 
 ### Alert webhook and incident data
 

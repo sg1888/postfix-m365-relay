@@ -1,0 +1,153 @@
+name: build, test, then push
+description: >
+  Build one image variant from scratch, test that exact image, and only then
+  push it. The candidate is built once into a per-run layer cache; the tested
+  image and the pushed image are both assembled from those same cached layers,
+  so what passed the tests is byte-for-byte what is published. Nothing reaches
+  a registry unless every step before the push succeeded.
+
+inputs:
+  base-image:
+    description: base image tag (resolved to a digest once, so every build uses the same base)
+    required: true
+  extra-build-args:
+    description: additional build args, one KEY=value per line
+    required: false
+    default: ''
+  platforms:
+    description: comma-separated platforms to publish
+    required: true
+  test-platform:
+    description: the platform the container tests run on (native to the runner)
+    required: true
+  package-assert:
+    description: bash run inside the image on every platform before push (package invariants)
+    required: true
+  tags:
+    description: tags to push (docker/metadata-action output)
+    required: true
+  labels:
+    description: labels to apply (docker/metadata-action output)
+    required: true
+
+outputs:
+  digest:
+    description: pushed manifest-list digest
+    value: ${{ steps.push.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    # The tag (for example ubuntu:24.04) can move while this job runs. Pinning
+    # it to today's digest keeps the candidate, the tested image, and the pushed
+    # image on one base.
+    - id: base
+      shell: bash
+      env:
+        BASE: ${{ inputs.base-image }}
+      run: |
+        digest=$(docker buildx imagetools inspect "$BASE" --format '{{.Manifest.Digest}}')
+        echo "ref=${BASE}@${digest}" >> "$GITHUB_OUTPUT"
+        echo "base image: ${BASE}@${digest}"
+
+    - id: args
+      shell: bash
+      env:
+        BASE_REF: ${{ steps.base.outputs.ref }}
+        EXTRA: ${{ inputs.extra-build-args }}
+      run: |
+        {
+          echo 'list<<BUILD_ARGS_EOF'
+          echo "BASE_IMAGE=$BASE_REF"
+          [ -z "$EXTRA" ] || printf '%s\n' "$EXTRA"
+          echo 'BUILD_ARGS_EOF'
+        } >> "$GITHUB_OUTPUT"
+
+    # 1. Candidate: every platform, no layer cache (current distro packages,
+    #    current CA bundle). Exported to a job-local layer cache that the later
+    #    builds read, so they reproduce these layers instead of rebuilding.
+    - name: Build candidate (all platforms, no cache)
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: build/postfix-m365-relay/Dockerfile
+        build-args: ${{ steps.args.outputs.list }}
+        platforms: ${{ inputs.platforms }}
+        no-cache: true
+        push: false
+        cache-to: type=local,dest=${{ runner.temp }}/candidate-cache,mode=max
+        provenance: false
+
+    # 2. Load the native-platform candidate (from the cache: the same layers).
+    - name: Load candidate for tests
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: build/postfix-m365-relay/Dockerfile
+        build-args: ${{ steps.args.outputs.list }}
+        platforms: ${{ inputs.test-platform }}
+        load: true
+        tags: postfix-m365-relay:candidate
+        cache-from: type=local,src=${{ runner.temp }}/candidate-cache
+        provenance: false
+
+    # 3. Gates on the exact candidate. ignore-unfixed: fail only on
+    #    CRITICAL/HIGH findings that have a fix available.
+    - name: Vulnerability scan (Trivy)
+      uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+      with:
+        image-ref: postfix-m365-relay:candidate
+        format: table
+        scanners: vuln
+        severity: CRITICAL,HIGH
+        ignore-unfixed: true
+        exit-code: '1'
+
+    # The server works: offline credential code, a real Postfix delivering
+    # through XOAUTH2 to a sink, the healthcheck/config contract, and the
+    # security/supervisor/read-only policy.
+    - name: Container tests on the candidate
+      shell: bash
+      run: |
+        ./tests/python-unit.sh postfix-m365-relay:candidate
+        ./tests/container-end-to-end.sh postfix-m365-relay:candidate
+        ./tests/container-config-matrix.sh postfix-m365-relay:candidate
+        ./tests/container-policy.sh postfix-m365-relay:candidate
+
+    # Every published platform (arm64 runs under QEMU) gets the package
+    # invariants checked before anything is pushed.
+    - name: Package assertions on every platform
+      shell: bash
+      env:
+        PLATFORMS: ${{ inputs.platforms }}
+        ASSERT: ${{ inputs.package-assert }}
+        BUILD_ARGS: ${{ steps.args.outputs.list }}
+        CACHE: ${{ runner.temp }}/candidate-cache
+      run: |
+        args=()
+        while IFS= read -r line; do [ -n "$line" ] && args+=(--build-arg "$line"); done <<< "$BUILD_ARGS"
+        IFS=, read -ra platforms <<< "$PLATFORMS"
+        for platform in "${platforms[@]}"; do
+          tag="postfix-m365-relay:assert-${platform//\//-}"
+          docker buildx build --platform "$platform" --load -t "$tag" "${args[@]}" \
+            --cache-from "type=local,src=$CACHE" \
+            -f build/postfix-m365-relay/Dockerfile .
+          docker run --rm --platform "$platform" --entrypoint /bin/bash "$tag" -c "$ASSERT"
+          echo "ok package assertions on $platform"
+        done
+
+    # 4. Only now push, assembled from the same cached layers.
+    - id: push
+      name: Push tested image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: build/postfix-m365-relay/Dockerfile
+        build-args: ${{ steps.args.outputs.list }}
+        platforms: ${{ inputs.platforms }}
+        push: true
+        tags: ${{ inputs.tags }}
+        labels: ${{ inputs.labels }}
+        cache-from: type=local,src=${{ runner.temp }}/candidate-cache
+        provenance: true
+        sbom: true

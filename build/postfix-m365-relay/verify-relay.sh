@@ -97,36 +97,44 @@ else
     'Inbound STARTTLS is disabled; no server certificate requires renewal' || true
 fi
 
-# A running image is immutable: its public root store does not receive distro
-# updates in place. This age check is intentionally based on package install time,
-# not individual root expiry dates; trust stores also remove distrusted roots
-# and add new intermediates, neither of which an expiry-only scan can detect.
-if command -v rpm >/dev/null 2>&1; then
+# A running image is immutable: its public root store and its other packages do
+# not receive distro updates in place. The image build records when it upgraded
+# the distro packages (build-scripts/postfix-install.sh writes the stamp below in
+# the same layer); this check alerts when that is older than the limit, which
+# means the container has not been moved to a newly built image. The date of the
+# ca-certificates package itself is deliberately not used: distros ship the same
+# bundle for months, so a current image would alert for a package that has no
+# newer version. Images built before the stamp existed fall back to that package
+# date (rpm install time, or the dpkg changelog mtime).
+ca_stamp=/usr/share/postfix-m365-relay/packages-refreshed
+if [[ -r $ca_stamp ]]; then
+  ca_install_epoch=$(tr -d '[:space:]' < "$ca_stamp")
+  ca_what='image packages and CA bundle were refreshed'
+elif command -v rpm >/dev/null 2>&1; then
   ca_install_epoch=$(rpm -q --qf '%{INSTALLTIME}' ca-certificates 2>/dev/null || true)
+  ca_what='image CA bundle package was installed'
 elif command -v dpkg-query >/dev/null 2>&1; then
-  # Debian/Ubuntu carry no package install-time field. Approximate the trust
-  # store's vintage with the mtime of the package changelog, which dpkg preserves
-  # from the .deb (the package build date, not our install moment) and which
-  # advances whenever ca-certificates is updated — matching the intent of
-  # flagging a stale bundle rather than a freshly rebuilt image.
   ca_doc=$(ls -t /usr/share/doc/ca-certificates/changelog*.gz 2>/dev/null | head -n1)
   ca_install_epoch=$(stat -c %Y "$ca_doc" 2>/dev/null || true)
+  ca_what='image CA bundle package was built'
 else
   ca_install_epoch=
 fi
 ca_max_age_days=${MAIL_CA_BUNDLE_MAX_AGE_DAYS:-90}
 if [[ $ca_install_epoch =~ ^[0-9]+$ && $ca_max_age_days =~ ^[0-9]+$ ]]; then
-  ca_age_days=$(( ($(date +%s) - ca_install_epoch) / 86400 ))
-  if (( ca_age_days > ca_max_age_days )); then
-    ca_detail="image CA bundle is ${ca_age_days} days old; rebuild, test, pull, and recreate the container"
+  # Compared in seconds, so a limit of 0 means "any age" rather than "a full day".
+  ca_age_seconds=$(( $(date +%s) - ca_install_epoch ))
+  ca_age_days=$(( ca_age_seconds / 86400 ))
+  if (( ca_age_seconds > ca_max_age_days * 86400 )); then
+    ca_detail="${ca_what} ${ca_age_days} days ago (limit ${ca_max_age_days}); pull the current image and recreate the container"
     warn "$ca_detail"
     /usr/local/libexec/mail-relay/alert.sh open warning ca-bundle-age "$ca_detail" || true
   else
     /usr/local/libexec/mail-relay/alert.sh recover ca-bundle-age \
-      "Image CA bundle age is within the configured ${ca_max_age_days}-day limit" || true
+      "Image package and CA bundle age is within the configured ${ca_max_age_days}-day limit" || true
   fi
 else
-  bad certificate 'could not determine CA-bundle package age or MAIL_CA_BUNDLE_MAX_AGE_DAYS is invalid'
+  bad certificate 'could not determine image package age or MAIL_CA_BUNDLE_MAX_AGE_DAYS is invalid'
 fi
 
 rotation_log=${MAIL_ROTATION_LOG_FILE:-/var/lib/mail-relay/cert-rotation.log}

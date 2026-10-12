@@ -14,6 +14,9 @@
 # Bind mounts provided by the Dockerfile RUN:
 #   /build-scripts          this script
 #   /vendor-sasl-xoauth2    checksum-pinned .deb set (ubuntu vendored mode)
+#
+# Writes /usr/share/postfix-m365-relay/packages-refreshed (epoch seconds of the
+# package upgrade), read at runtime by verify-relay.sh for the ca-bundle-age check.
 set -eu
 
 # The XOAUTH2 config the sasl-xoauth2 plugin loads. Deliberately points token
@@ -90,6 +93,9 @@ do_alma() {
 do_ubuntu() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
+  # The ubuntu:24.04 base is a periodic snapshot; security fixes published since
+  # (openssl, glibc, ca-certificates, ...) arrive only through this upgrade.
+  apt-get -y upgrade
   apt-get install -y --no-install-recommends \
     postfix libsasl2-2 libsasl2-modules sasl2-bin ca-certificates \
     python3 python3-cryptography openssl curl netcat-openbsd iproute2 tzdata
@@ -168,3 +174,11 @@ else
   echo "unsupported base image: neither dnf (AlmaLinux/EL) nor apt-get (Debian/Ubuntu) found" >&2
   exit 1
 fi
+
+# Package-refresh stamp: the moment this layer upgraded the distro packages,
+# including the CA bundle. verify-relay.sh alerts (event ca-bundle-age) when it
+# is older than MAIL_CA_BUNDLE_MAX_AGE_DAYS. A package's own date cannot serve:
+# a distro may correctly ship the same ca-certificates for months, so its age
+# says nothing about whether this image missed updates. Written in the same
+# layer as the upgrade, a cached (stale) layer keeps its old, honest stamp.
+date -u +%s > /usr/share/postfix-m365-relay/packages-refreshed

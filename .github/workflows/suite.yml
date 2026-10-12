@@ -5,6 +5,22 @@ name: suite
 # jobs there depend on it, so a v* tag cannot publish images unless this passes).
 on:
   workflow_call:
+    inputs:
+      ref:
+        # The commit to test. Empty means the triggering commit. The scheduled
+        # rebuild in publish-image.yml passes the release tag it rebuilds.
+        description: git ref to check out and test
+        type: string
+        required: false
+        default: ''
+      fresh:
+        # true: build from a freshly pulled base with no layer cache, so Trivy
+        # scans today's packages. The release gate sets it; PR/push runs keep
+        # the cache for speed.
+        description: build without the layer cache
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   # Host-side unit tests for the pure shell helpers (lib/text.sh). Container-free
@@ -13,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - name: Shell unit tests (bats)
         run: ./tests/bats-unit.sh
 
@@ -32,6 +50,8 @@ jobs:
             base: almalinux:10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       # Static checks run before package downloads so basic syntax failures are
       # reported quickly and do not consume Buildx/QEMU time.
@@ -56,6 +76,8 @@ jobs:
           tags: postfix-m365-relay:test
           cache-from: type=gha,scope=tests-${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=tests-${{ matrix.variant }}
+          pull: ${{ inputs.fresh }}
+          no-cache: ${{ inputs.fresh }}
           provenance: false
 
       # Vulnerability scan of the freshly built image. ignore-unfixed keeps the

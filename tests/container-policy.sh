@@ -179,8 +179,13 @@ echo 'ok AUTH absent before STARTTLS, PLAIN/LOGIN only after, sasldb login succe
 # the disposable container's smtpd executable and retire existing workers; the
 # master keeps its listener but cannot service a new connection. A TCP-connect-
 # only healthcheck would falsely pass this condition.
-health_command="printf 'QUIT\\r\\n' | nc -w 3 127.0.0.1 2525 | grep -q '^220 '"
+health_command="{ sleep 1; printf 'QUIT\\r\\n'; } | nc -w 3 127.0.0.1 2525 | grep -q '^220 '"
 docker exec "$container" timeout 5 bash -c "$health_command"
+# The build stamps when it upgraded the distro packages; verify-relay.sh's
+# ca-bundle-age check reads it. It must exist and be a past epoch time.
+stamp=$(docker exec "$container" cat /usr/share/postfix-m365-relay/packages-refreshed)
+[[ $stamp =~ ^[0-9]+$ ]] && (( stamp <= $(date +%s) ))
+echo 'ok image carries its package-refresh stamp'
 daemon_directory=$(docker exec "$container" postconf -h daemon_directory)
 docker exec "$container" mv "$daemon_directory/smtpd" "$daemon_directory/smtpd.health-test-disabled"
 # The minimal image intentionally has no procps (`ps`, `pgrep`, or `pkill`). An

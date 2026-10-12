@@ -1,28 +1,138 @@
 name: publish image
 
+# Two ways a release is published, both through the same gates:
+#   1. You push a v* tag (scripts/release.sh). That tag is built and published.
+#   2. Automatic refresh. Daily, the "plan" job asks each published variant of
+#      the newest release which distro updates it is missing
+#      (.github/scripts/pending-updates.sh). If any is a key package (Postfix,
+#      SASL, OpenSSL, the CA bundle, Python cryptography, curl, glibc, ...) or a
+#      security fix, it releases the next patch version (v1.1.0 -> v1.1.1) from
+#      the same source commit with current packages. Otherwise nothing happens.
+# Nothing is pushed before it passes: the full test suite (both distros, fresh
+# packages, Trivy), then per variant a from-scratch build whose exact layers are
+# scanned, container-tested and package-checked on every platform before the
+# push (.github/actions/build-test-push). An automatic release's git tag is
+# created last, only after every variant was published.
 on:
   push:
     tags: ["v*"]
+  schedule:
+    - cron: "23 5 * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: release a refresh even if no key or security update is pending
+        type: boolean
+        default: false
+
+# A refresh and a release must never publish the same tags at the same time.
+concurrency:
+  group: publish-image
+  cancel-in-progress: false
 
 env:
   IMAGE_NAME: postfix-m365-relay
 
 jobs:
-  # Release gate: run the exact same suite as CI (host unit tests + both-variant
-  # container suites + Trivy) before any image is built or pushed. Every build job
-  # depends on this (directly or transitively via build-ubuntu), so a v* tag
-  # cannot publish images unless the suite passes.
+  # What to publish, if anything. A tag push publishes that tag. A scheduled or
+  # manual run checks the newest stable release for pending updates and, if a
+  # release is warranted, picks the next patch version of it.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      version: ${{ steps.plan.outputs.version }}
+      sha: ${{ steps.plan.outputs.sha }}
+      stable: ${{ steps.plan.outputs.stable }}
+      create_tag: ${{ steps.plan.outputs.create_tag }}
+      base_version: ${{ steps.plan.outputs.base_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-qemu-action@v3
+      - id: plan
+        env:
+          IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = push ]; then
+            version="${GITHUB_REF_NAME}"
+            case "$version" in *-*) stable=false ;; *) stable=true ;; esac
+            {
+              echo "publish=true"; echo "version=$version"; echo "sha=${GITHUB_SHA}"
+              echo "stable=$stable"; echo "create_tag=false"; echo "base_version="
+            } >> "$GITHUB_OUTPUT"
+            echo "Release $version pushed by tag." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          last=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -v -- - | head -n1)
+          [ -n "$last" ] || { echo "::error::no stable release tag to refresh"; exit 1; }
+          sha=$(git rev-list -n1 "$last")
+          v=${last#v}
+
+          : > updates.txt
+          for variant in "$v linux/amd64" "$v-alma-v3 linux/amd64" "$v-alma-v2 linux/amd64/v2"; do
+            read -r tag platform <<< "$variant"
+            echo "## $tag" >> updates.txt
+            if ! .github/scripts/pending-updates.sh "$IMAGE:$tag" "$platform" >> updates.txt; then
+              echo "image $IMAGE:$tag could not be checked [key]" >> updates.txt
+            fi
+          done
+
+          if grep -Eq '\[(key|security)\]' updates.txt || [ "$FORCE" = true ]; then
+            IFS=. read -r major minor patch <<< "$v"
+            next="v${major}.${minor}.$((patch + 1))"
+            # A tag of that name can only exist if a previous refresh pushed it and
+            # then failed; never reuse it.
+            if git rev-parse -q --verify "refs/tags/$next" >/dev/null; then
+              echo "::error::$next already exists but is not the newest release; fix the tags by hand"
+              exit 1
+            fi
+            publish=true
+          else
+            next="$last"; publish=false
+          fi
+          {
+            echo "publish=$publish"; echo "version=$next"; echo "sha=$sha"
+            echo "stable=true"; echo "create_tag=$publish"; echo "base_version=$last"
+          } >> "$GITHUB_OUTPUT"
+          {
+            if [ "$publish" = true ]; then
+              echo "Refresh: releasing $next (from $last, commit ${sha:0:12}) with current packages."
+            else
+              echo "No key or security update pending for $last; nothing to release."
+            fi
+            echo; echo '```'; cat updates.txt; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pending-updates
+          path: updates.txt
+          if-no-files-found: ignore
+
+  # Release gate: the exact same suite as CI (host unit tests + both-variant
+  # container suites + Trivy), built without layer cache so it tests today's
+  # packages.
   suite:
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
     uses: ./.github/workflows/suite.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+      fresh: true
 
   # Default image. Ubuntu is the x86-64 v1 baseline, so one manifest runs on every
   # amd64 CPU (including default-CPU VMs) plus arm64 — no micro-arch tag split. It
   # owns the unsuffixed tags: latest, {{version}}, {{major}}.{{minor}}, {{major}},
   # and the moving `ubuntu` alias.
   build-ubuntu:
-    needs: suite
+    needs: [plan, suite]
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -32,6 +142,8 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -54,46 +166,31 @@ jobs:
           # is how `latest` silently became the Alma image. The Ubuntu job still
           # gets latest via its explicit raw tag; the Alma jobs must never claim it.
           flavor: latest=false
+          # The built commit, which on a refresh is the release's, not main's.
+          labels: |
+            org.opencontainers.image.revision=${{ needs.plan.outputs.sha }}
           images: |
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=semver,pattern={{version}}-ubuntu
-            type=semver,pattern={{major}}.{{minor}}-ubuntu
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
-            type=raw,value=ubuntu,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=semver,pattern={{version}},value=${{ needs.plan.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.plan.outputs.version }}
+            type=semver,pattern={{major}},value=${{ needs.plan.outputs.version }}
+            type=semver,pattern={{version}}-ubuntu,value=${{ needs.plan.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}}-ubuntu,value=${{ needs.plan.outputs.version }}
+            type=raw,value=latest,enable=${{ needs.plan.outputs.stable == 'true' }}
+            type=raw,value=ubuntu,enable=${{ needs.plan.outputs.stable == 'true' }}
       - id: build
-        uses: docker/build-push-action@v6
+        uses: ./.github/actions/build-test-push
         with:
-          context: .
-          file: build/postfix-m365-relay/Dockerfile
-          build-args: |
-            BASE_IMAGE=ubuntu:24.04
+          base-image: ubuntu:24.04
           platforms: linux/amd64,linux/arm64
-          push: true
+          test-platform: linux/amd64
+          package-assert: >-
+            test "$(dpkg-query -W -f='${Version}' sasl-xoauth2 | cut -d- -f1)" = 0.27 &&
+            python3 -c 'import cryptography' && command -v saslpasswd2 >/dev/null
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=ubuntu
-          cache-to: type=gha,mode=max,scope=ubuntu
-          provenance: true
-          sbom: true
-      - name: Assert runtime packages (amd64 native, arm64 emulated)
-        run: |
-          # Reference the multi-arch manifest by TAG, not by @digest. The runner's
-          # classic image store rejects `docker run --platform <native> ref@<index
-          # digest>` with "cannot overwrite digest" because the selected per-arch
-          # sub-manifest digest differs from the index digest. A tag lets docker
-          # select each platform's sub-manifest cleanly; --pull always keeps it
-          # honest. The build's index digest is still what gets attested below.
-          image="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
-          for platform in linux/amd64 linux/arm64; do
-            docker run --rm --pull always --platform "$platform" --entrypoint /bin/bash "$image" -c \
-              "test \"\$(dpkg-query -W -f='\${Version}' sasl-xoauth2 | cut -d- -f1)\" = 0.27 && \
-               python3 -c 'import cryptography' && command -v saslpasswd2"
-          done
       - name: Attest GHCR provenance
         uses: actions/attest-build-provenance@v2
         with:
@@ -110,7 +207,7 @@ jobs:
     # Gate on build-ubuntu: it owns latest/{{version}}/{{major}}.{{minor}}. If it
     # fails, skip the Alma publishes too, so a release is all-or-nothing and never
     # ships new alma-vN tags beside a stale latest.
-    needs: build-ubuntu
+    needs: [plan, build-ubuntu]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -119,6 +216,8 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -141,34 +240,28 @@ jobs:
           # is how `latest` silently became the Alma image. The Ubuntu job still
           # gets latest via its explicit raw tag; the Alma jobs must never claim it.
           flavor: latest=false
+          # The built commit, which on a refresh is the release's, not main's.
+          labels: |
+            org.opencontainers.image.revision=${{ needs.plan.outputs.sha }}
           images: |
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}}-alma-v3
-            type=semver,pattern={{major}}.{{minor}}-alma-v3
-            type=semver,pattern={{major}}-alma-v3
-            type=raw,value=alma-v3,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=semver,pattern={{version}}-alma-v3,value=${{ needs.plan.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}}-alma-v3,value=${{ needs.plan.outputs.version }}
+            type=semver,pattern={{major}}-alma-v3,value=${{ needs.plan.outputs.version }}
+            type=raw,value=alma-v3,enable=${{ needs.plan.outputs.stable == 'true' }}
       - id: build
-        uses: docker/build-push-action@v6
+        uses: ./.github/actions/build-test-push
         with:
-          context: .
-          file: build/postfix-m365-relay/Dockerfile
-          build-args: |
-            BASE_IMAGE=almalinux:10
+          base-image: almalinux:10
           platforms: linux/amd64,linux/arm64
-          push: true
+          test-platform: linux/amd64
+          package-assert: >-
+            test "$(rpm -q --qf '%{VERSION}' sasl-xoauth2)" = 0.27 &&
+            python3 -c 'import cryptography' && command -v saslpasswd2 >/dev/null
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=alma-v3
-          cache-to: type=gha,mode=max,scope=alma-v3
-          provenance: true
-          sbom: true
-      - name: Assert arm64 runtime packages
-        run: |
-          image="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
-          docker run --rm --platform linux/arm64 --entrypoint /bin/bash "$image" -c \
-            "test \"\$(rpm -q --qf '%{VERSION}' sasl-xoauth2)\" = 0.27 && python3 -c 'import cryptography' && command -v saslpasswd2"
       - name: Attest GHCR provenance
         uses: actions/attest-build-provenance@v2
         with:
@@ -181,13 +274,15 @@ jobs:
   # `-alma-v2` tags. This replaces the old `-x86-64-v2` suffix tags.
   build-alma-v2:
     # Gate on build-ubuntu for the same all-or-nothing reason as build-alma-v3.
-    needs: build-ubuntu
+    needs: [plan, build-ubuntu]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -210,48 +305,43 @@ jobs:
           # is how `latest` silently became the Alma image. The Ubuntu job still
           # gets latest via its explicit raw tag; the Alma jobs must never claim it.
           flavor: latest=false
+          # The built commit, which on a refresh is the release's, not main's.
+          labels: |
+            org.opencontainers.image.revision=${{ needs.plan.outputs.sha }}
           images: |
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}}-alma-v2
-            type=semver,pattern={{major}}.{{minor}}-alma-v2
-            type=semver,pattern={{major}}-alma-v2
-            type=raw,value=alma-v2,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=semver,pattern={{version}}-alma-v2,value=${{ needs.plan.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}}-alma-v2,value=${{ needs.plan.outputs.version }}
+            type=semver,pattern={{major}}-alma-v2,value=${{ needs.plan.outputs.version }}
+            type=raw,value=alma-v2,enable=${{ needs.plan.outputs.stable == 'true' }}
       - id: build
-        uses: docker/build-push-action@v6
+        uses: ./.github/actions/build-test-push
         with:
-          context: .
-          file: build/postfix-m365-relay/Dockerfile
-          platforms: linux/amd64/v2
+          base-image: almalinux/10-base:10
           # EXPECT_ALMALINUX_ARCH prevents a superficially successful v2-tagged
           # build from using the normal v3 base. This exact omission produced a
           # glibc "CPU does not support x86-64-v3" failure during local testing.
-          build-args: |
-            BASE_IMAGE=almalinux/10-base:10
-            EXPECT_ALMALINUX_ARCH=x86_64_v2
-          push: true
+          extra-build-args: EXPECT_ALMALINUX_ARCH=x86_64_v2
+          platforms: linux/amd64/v2
+          test-platform: linux/amd64/v2
+          package-assert: >-
+            test "$(rpm -q --qf '%{ARCH}' almalinux-release)" = x86_64_v2 &&
+            test "$(rpm -q --qf '%{ARCH}' sasl-xoauth2)" = x86_64_v2 &&
+            test "$(rpm -q --qf '%{VERSION}' sasl-xoauth2)" = 0.27 &&
+            rpm -q --qf '%{RELEASE}' sasl-xoauth2 | grep -q '\.alma_altarch' &&
+            python3 -c 'import cryptography' && command -v saslpasswd2 >/dev/null
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=alma-v2
-          cache-to: type=gha,mode=max,scope=alma-v2
-          provenance: true
-          sbom: true
-      - name: Assert x86-64-v2 runtime packages
-        run: |
-          image="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
-          docker run --rm --platform linux/amd64/v2 --entrypoint /bin/bash "$image" -c \
-            "test \"\$(rpm -q --qf '%{ARCH}' almalinux-release)\" = x86_64_v2 && \
-             test \"\$(rpm -q --qf '%{ARCH}' sasl-xoauth2)\" = x86_64_v2 && \
-             test \"\$(rpm -q --qf '%{VERSION}' sasl-xoauth2)\" = 0.27 && \
-             rpm -q --qf '%{RELEASE}' sasl-xoauth2 | grep -q '\\.alma_altarch' && \
-             python3 -c 'import cryptography' && command -v saslpasswd2"
 
   dockerhub-description:
-    needs: [build-ubuntu, build-alma-v3, build-alma-v2]
+    needs: [plan, build-ubuntu, build-alma-v3, build-alma-v2]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
       # Pinned to the audited v5 commit; a moved tag cannot slip in unreviewed
       # code that would run with the Docker Hub credential.
       - uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5
@@ -272,8 +362,8 @@ jobs:
   # instead of leaving latest quietly wrong. Only meaningful on a real version tag
   # (the one that actually pushes the moving latest/ubuntu tags).
   verify-latest:
-    needs: [build-ubuntu, build-alma-v3, build-alma-v2]
-    if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+    needs: [plan, build-ubuntu, build-alma-v3, build-alma-v2]
+    if: ${{ needs.plan.outputs.stable == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: latest must equal the freshly published ubuntu image
@@ -288,3 +378,107 @@ jobs:
             exit 1
           fi
           echo "ok: latest points at the ubuntu build"
+
+  # Automatic refresh only: record the release in git, last, so a tag exists
+  # only for a version whose every variant passed and was published. Created
+  # with GITHUB_TOKEN, which by design does not trigger this workflow again.
+  tag-release:
+    needs: [plan, build-ubuntu, build-alma-v3, build-alma-v2, verify-latest]
+    if: needs.plan.outputs.create_tag == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: pending-updates
+      - env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          BASE: ${{ needs.plan.outputs.base_version }}
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          # The tag is recorded as the maintainer's, like every manual release.
+          git config user.name "sg1888"
+          git config user.email "sg1888@users.noreply.github.com"
+          {
+            echo "postfix-m365-relay $VERSION"
+            echo
+            echo "Automatic package refresh of $BASE: same source, current distro packages."
+            echo "Pending updates that triggered it:"
+            echo
+            grep -E '^## |\[(key|security)\]' updates.txt || true
+          } > tag-message.txt
+          git tag -a "$VERSION" -F tag-message.txt "$SHA"
+          git push origin "$VERSION"
+          echo "Tagged $VERSION at ${SHA:0:12}." >> "$GITHUB_STEP_SUMMARY"
+
+  # GitHub release page for every published version, so the history says what
+  # changed and why. A manual release gets GitHub's generated notes (commits and
+  # pull requests since the previous tag); an automatic refresh gets the package
+  # updates that triggered it. Both list the digest to pin. Created with the
+  # RELEASE_TOKEN secret when set (a fine-grained token of the maintainer with
+  # contents: write, so the release shows as theirs), else GITHUB_TOKEN (shows as
+  # github-actions). Creating a release triggers no workflow, so a personal
+  # token is safe here.
+  release-notes:
+    needs: [plan, build-ubuntu, build-alma-v3, build-alma-v2, verify-latest, tag-release]
+    if: >-
+      always() && needs.plan.outputs.publish == 'true' &&
+      needs.build-ubuntu.result == 'success' && needs.build-alma-v3.result == 'success' &&
+      needs.build-alma-v2.result == 'success' &&
+      (needs.verify-latest.result == 'success' || needs.verify-latest.result == 'skipped') &&
+      (needs.tag-release.result == 'success' || needs.tag-release.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.create_tag == 'true'
+        with:
+          name: pending-updates
+      - env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          BASE: ${{ needs.plan.outputs.base_version }}
+          REFRESH: ${{ needs.plan.outputs.create_tag }}
+          STABLE: ${{ needs.plan.outputs.stable }}
+          DIGEST: ${{ needs.build-ubuntu.outputs.digest }}
+          IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+        run: |
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "release $VERSION already exists; leaving it as it is"
+            exit 0
+          fi
+          {
+            if [ "$REFRESH" = true ]; then
+              echo "Automatic package refresh of $BASE. Same source code; the image was"
+              echo "rebuilt with current distro packages because these updates were pending"
+              echo "([key] = a package the relay depends on directly, [security] = a distro"
+              echo "security fix):"
+              echo
+              echo '```'
+              grep -E '^## |\[(key|security)\]' updates.txt || true
+              echo '```'
+              echo
+              echo "<details><summary>All pending updates</summary>"
+              echo
+              echo '```'
+              cat updates.txt
+              echo '```'
+              echo "</details>"
+            fi
+            echo
+            echo "Pin: \`MAIL_IMAGE=$IMAGE@$DIGEST\`"
+            echo
+            echo "Tags: \`${VERSION#v}\`, \`${VERSION#v}-alma-v3\`, \`${VERSION#v}-alma-v2\` (Docker Hub and GHCR)."
+          } > notes.md
+          args=(--title "$VERSION" --notes-file notes.md --verify-tag)
+          [ "$REFRESH" = true ] || args+=(--generate-notes)
+          [ "$STABLE" = true ] || args+=(--prerelease)
+          gh release create "$VERSION" "${args[@]}"

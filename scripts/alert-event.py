@@ -102,9 +102,15 @@ GUIDANCE: dict[str, dict[str, list[str]]] = {
         ],
     },
     "ca-bundle-age": {
-        "causes": ["The immutable image has not received current public root-CA updates."],
+        "causes": [
+            "The running image's distro packages, including the public root-CA bundle, "
+            "were refreshed longer ago than MAIL_CA_BUNDLE_MAX_AGE_DAYS: the container "
+            "has not been moved to a newly built image.",
+        ],
         "remediation": [
-            "Pull a current image and recreate the container after normal testing.",
+            "Pull the current image (rebuilt weekly from the latest release) and recreate "
+            "the container after normal testing.",
+            "If the published image is itself old, check the scheduled publish workflow.",
             "Do not update CA files manually inside the disposable container layer.",
         ],
     },

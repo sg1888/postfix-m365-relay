@@ -22,7 +22,10 @@
 #
 # Image update policy:
 #   - the base tag is pinned; --pull refreshes patches inside it
-#   - distro packages float, because that is where security fixes arrive
+#   - distro packages float, because that is where security fixes arrive; the
+#     install step upgrades them and stamps when (verify-relay.sh alerts on age)
+#   - published images are rebuilt and re-released whenever a key or security
+#     update is pending (docs/RELEASING.md, "Automatic package refreshes")
 #   - the built image is digest-pinned afterwards by your own image-pinning step
 # A rebuild without --pull reuses the cached base layer and ships last month's
 # libraries while looking like it did something.

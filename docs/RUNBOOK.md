@@ -86,7 +86,7 @@ exponential backoff (30, 60, 120 sec, up to 1 hr). Audit lines always written.
 | SMTP listener, token, OAuth cert, or rotation audit | verifier hard failure | that category passes |
 | OAuth or managed inbound-TLS rotation | loop operation fails | later loop operation succeeds |
 | BYO inbound TLS | certificate enters renewal window | replacement is outside the window |
-| CA bundle age | exceeds `MAIL_CA_BUNDLE_MAX_AGE_DAYS` | current image is within policy |
+| image package / CA bundle age | package refresh stamp older than `MAIL_CA_BUNDLE_MAX_AGE_DAYS` | container recreated on a newer image |
 | deferred queue | exceeds `MAIL_QUEUE_WARN_DEPTH` | returns to/below threshold |
 | inbound SASL failures | exceeds `MAIL_SASL_FAILURE_WARN_COUNT` | returns to/below threshold |
 | passthrough alias | proof is refused or not observed sent | all enabled alias probes send |

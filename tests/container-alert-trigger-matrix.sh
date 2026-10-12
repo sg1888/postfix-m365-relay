@@ -97,6 +97,8 @@ wait_event oauth-certificate-health open; verify MAIL_RELAY_CERT_FILE=/run/secre
 verify; wait_event oauth-certificate-health recovered
 verify MAIL_CA_BUNDLE_MAX_AGE_DAYS=0
 wait_event ca-bundle-age open; verify MAIL_CA_BUNDLE_MAX_AGE_DAYS=0; sleep 1; [[ $(open_event_lines ca-bundle-age) == 1 ]]
+# The age comes from the image's package-refresh stamp, not the CA package date.
+grep -F '"ca-bundle-age"' "$fixture/webhooks.jsonl" | grep -Fq 'image packages and CA bundle were refreshed'
 verify MAIL_CA_BUNDLE_MAX_AGE_DAYS=99999; wait_event ca-bundle-age recovered
 docker exec "$relay" touch /var/spool/postfix/deferred/alert-trigger-test
 verify MAIL_QUEUE_WARN_DEPTH=0; wait_event queue-depth-health open

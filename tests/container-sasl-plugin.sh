@@ -2,7 +2,7 @@
 # Prove the image's XOAUTH2 plugin is the one we meant to ship and that Cyrus
 # SASL actually loads it:
 #   - every image: libsasl2 lists XOAUTH2 as a client mechanism, and PLAIN and
-#     LOGIN as server mechanisms (inbound device AUTH)
+#     LOGIN as server mechanisms (inbound device AUTH), and no other mechanism
 #   - source-built images (Ubuntu/Debian/Alpine): the provenance record names
 #     exactly the commit and tree in vendor/sasl-xoauth2/UPSTREAM, the plugin's
 #     libraries all resolve, and no build toolchain leaked into the image
@@ -59,6 +59,11 @@ fail() { echo "container-sasl-plugin: $*" >&2; printf '%s\n' "$out" >&2; exit 1;
 [[ " $(get client) " == *" XOAUTH2 "* ]] || fail "XOAUTH2 is not a loaded client mechanism"
 for mech in PLAIN LOGIN; do
   [[ " $(get server) " == *" $mech "* ]] || fail "$mech is not a loaded server mechanism"
+done
+# The build removes every other mechanism (postfix-install.sh, slim_image):
+# nothing beyond what the relay uses may be loadable on either side.
+for mech in ANONYMOUS CRAM-MD5 DIGEST-MD5 NTLM GSSAPI GS2-KRB5 OTP SRP SCRAM-SHA-1 SCRAM-SHA-256 SCRAM-SHA-512; do
+  [[ " $(get client) $(get server) " != *" $mech "* ]] || fail "unused SASL mechanism $mech is still loadable"
 done
 [[ -z $(get leaked) ]] || fail "build tools leaked into the image: $(get leaked)"
 [[ $(get scratch) == absent ]] || fail "builder scratch source left in the image"

@@ -115,6 +115,8 @@ jobs:
         run: ./tests/python-unit.sh postfix-m365-relay:test
       - name: XOAUTH2 plugin provenance and loading
         run: ./tests/container-sasl-plugin.sh postfix-m365-relay:test
+      - name: Image size budget and trimming
+        run: ./tests/container-image-size.sh postfix-m365-relay:test
       - name: Sender-name and regexp-map tests
         run: ./tests/container-sender-names.sh postfix-m365-relay:test
       - name: Optional-sender and sender-allowlist tests

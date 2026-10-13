@@ -44,6 +44,10 @@ was compiled from in `/usr/share/postfix-m365-relay/sasl-xoauth2.source`, and
 
 ## Updating
 
+`.github/workflows/sasl-xoauth2-watch.yml` does this automatically: daily, it
+looks for a newer upstream `release-*` tag, vendors it on a branch, runs the
+full test suite, and proposes it as a pull request (or an issue). By hand:
+
 ```bash
 vendor/sasl-xoauth2/update.sh release-0.29     # replaces src/, rewrites UPSTREAM
 git diff -- vendor/sasl-xoauth2                # read what upstream changed

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build each image variant and run the full offline suite against it. Variants
 # run SEQUENTIALLY: the suite resource names are shared across images, so two
-# images under test at once would collide. Within each variant the suites run in
-# parallel via run-offline.sh (honour TEST_JOBS).
+# images under test at once would collide. Within each variant the suites also
+# run serially by default (TEST_JOBS=1, passed to run-offline.sh).
 #
 # By default only the host-native variants are built and tested. amd64 variants
 # on an arm64 host build under QEMU and their cryptography tests can segfault
@@ -10,6 +10,11 @@
 # attempt the emulated amd64 variants locally (build confirmation is useful even
 # when the emulated test run is unreliable).
 set -uo pipefail
+# Suites run one at a time unless TEST_JOBS says otherwise. Parallel runs on
+# macOS Docker Desktop produce timing and bind-mount flakes (inbound-fullchain,
+# the end-to-end recurring alias probe) that are not image defects, so a gate
+# result is only trusted serially.
+export TEST_JOBS=${TEST_JOBS:-1}
 # The unified Dockerfile bind-mounts its build scripts, which requires BuildKit.
 export DOCKER_BUILDKIT=1
 here="$(cd "$(dirname "$0")" && pwd)"

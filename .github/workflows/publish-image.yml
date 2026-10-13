@@ -352,7 +352,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           test-platform: linux/amd64
           package-assert: >-
-            test "$(rpm -q --qf '%{VERSION}' sasl-xoauth2)" = 0.27 &&
+            rpm -q sasl-xoauth2 >/dev/null &&
             python3 -c 'import cryptography' && command -v saslpasswd2 >/dev/null
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -423,7 +423,7 @@ jobs:
           package-assert: >-
             test "$(rpm -q --qf '%{ARCH}' almalinux-release)" = x86_64_v2 &&
             test "$(rpm -q --qf '%{ARCH}' sasl-xoauth2)" = x86_64_v2 &&
-            test "$(rpm -q --qf '%{VERSION}' sasl-xoauth2)" = 0.27 &&
+            rpm -q sasl-xoauth2 >/dev/null &&
             rpm -q --qf '%{RELEASE}' sasl-xoauth2 | grep -q '\.alma_altarch' &&
             python3 -c 'import cryptography' && command -v saslpasswd2 >/dev/null
           tags: ${{ steps.meta.outputs.tags }}

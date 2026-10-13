@@ -18,6 +18,22 @@
 # package upgrade), read at runtime by verify-relay.sh for the ca-bundle-age check.
 set -eu
 
+# shellcheck source=build/postfix-m365-relay/build-scripts/version.sh
+. /build-scripts/version.sh
+
+# Oldest EPEL sasl-xoauth2 the AlmaLinux images accept. A FLOOR, not a pin:
+# EPEL updates the package in place, and a newer release must build (and is then
+# proven by the container suites) instead of breaking every Alma release and the
+# daily package refresh. Raise it only to refuse a known-bad older version.
+SXO_EPEL_MIN_VERSION=0.27
+
+# EPEL release package for AlmaLinux's x86-64-v2 rebuild. The newest one in the
+# repository listing is used; this known-good name is the fallback if the
+# listing cannot be read. The mirror keeps superseded versions, so the fallback
+# stays installable.
+altarch_epel_base=https://epel.repo.almalinux.org/10z/x86_64_v2/Packages/
+altarch_epel_fallback=epel-release-almalinux-altarch-10-6.el10.alma_altarch.noarch.rpm
+
 # The XOAUTH2 config the sasl-xoauth2 plugin loads. Deliberately points token
 # refresh at a dead endpoint: this container never refreshes on its own -- the
 # supervisor injects real tokens at runtime. Identical on every distro.
@@ -54,8 +70,12 @@ do_alma() {
   dnf -y upgrade
 
   if rpm -q --qf '%{ARCH}' almalinux-release | grep -qx x86_64_v2; then
-    dnf -y install --setopt=install_weak_deps=False \
-      https://epel.repo.almalinux.org/10z/x86_64_v2/Packages/epel-release-almalinux-altarch-10-6.el10.alma_altarch.noarch.rpm
+    altarch_epel=$(curl -fsS "$altarch_epel_base" 2>/dev/null |
+      grep -o 'epel-release-almalinux-altarch-[0-9][^"<>]*\.noarch\.rpm' |
+      sort -uV | tail -n1) || true
+    altarch_epel=${altarch_epel:-$altarch_epel_fallback}
+    echo "altarch EPEL release package: $altarch_epel"
+    dnf -y install --setopt=install_weak_deps=False "$altarch_epel_base$altarch_epel"
   else
     dnf -y install --setopt=install_weak_deps=False \
       https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
@@ -67,7 +87,12 @@ do_alma() {
   dnf clean all
   rm -rf /var/cache/dnf
 
-  rpm -q sasl-xoauth2 | grep -q '^sasl-xoauth2-0\.27'
+  sxo_version=$(rpm -q --qf '%{VERSION}' sasl-xoauth2)
+  echo "EPEL sasl-xoauth2 $sxo_version (floor $SXO_EPEL_MIN_VERSION)"
+  version_at_least "$sxo_version" "$SXO_EPEL_MIN_VERSION" || {
+    echo "EPEL sasl-xoauth2 $sxo_version is older than $SXO_EPEL_MIN_VERSION" >&2
+    exit 1
+  }
   if rpm -q --qf '%{ARCH}' almalinux-release | grep -qx x86_64_v2; then
     test "$(rpm -q --qf '%{ARCH}' sasl-xoauth2)" = x86_64_v2
     rpm -q --qf '%{RELEASE}' sasl-xoauth2 | grep -q '\.alma_altarch'
@@ -174,6 +199,63 @@ else
   echo "unsupported base image: need dnf (AlmaLinux/EL), apt-get (Debian/Ubuntu) or apk (Alpine)" >&2
   exit 1
 fi
+
+# Remove what a mail relay never uses, in this same layer so the bytes never
+# reach the image. Each removal is chosen to be functionally inert; the
+# container suites (container-sasl-plugin.sh, container-image-size.sh and the
+# delivery tests) prove it on every distro.
+slim_image() {
+  # Documentation, man/info pages and message catalogs. License texts stay:
+  # Debian keeps them as /usr/share/doc/<pkg>/copyright, EL in
+  # /usr/share/licenses (untouched). /usr/share/locale/locale.alias stays for
+  # glibc; compiled locales in /usr/lib/locale are not touched.
+  if [ -d /usr/share/doc ]; then
+    find /usr/share/doc -type f ! -name 'copyright' -delete
+    find /usr/share/doc -depth -type d -empty -delete
+  fi
+  rm -rf /usr/share/man /usr/share/info /usr/share/lintian /usr/share/gtk-doc
+  if [ -d /usr/share/locale ]; then
+    find /usr/share/locale -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+  fi
+
+  # Python stdlib parts for interactive or development use only: the pip
+  # bootstrapper, IDLE, Tk, turtle demos, 2to3, pydoc's topic data and the
+  # interpreter's own test suites.
+  for py in /usr/lib/python3.* /usr/lib64/python3.*; do
+    [ -d "$py" ] || continue
+    rm -rf "$py/ensurepip" "$py/idlelib" "$py/tkinter" "$py/turtledemo" \
+      "$py/turtle.py" "$py/lib2to3" "$py/pydoc_data" "$py/test" \
+      "$py/unittest/test"
+  done
+
+  # SASL mechanisms the relay never offers or uses. Inbound AUTH is PLAIN and
+  # LOGIN (sasldb), outbound is XOAUTH2; everything else is attack surface.
+  for dir in /usr/lib/sasl2 /usr/lib64/sasl2 /usr/lib/*/sasl2; do
+    [ -d "$dir" ] || continue
+    for mech in anonymous crammd5 digestmd5 gs2 gssapiv2 ntlm otp scram srp; do
+      rm -f "$dir/lib$mech.so" "$dir/lib$mech.so."*
+    done
+  done
+
+  # AlmaLinux's base image carries binutils (a linker toolchain, ~32 MB) that
+  # nothing installed here needs. Removed only when rpm confirms no package
+  # depends on it, so a future dependency skips this instead of failing the
+  # build.
+  if command -v rpm >/dev/null 2>&1; then
+    tools=$(rpm -q binutils-gold binutils 2>/dev/null | grep -v 'is not installed' | sed 's/-[0-9].*//' | tr '\n' ' ' || true)
+    tools=${tools% }
+    if [ -n "$tools" ]; then
+      # shellcheck disable=SC2086 -- package names, deliberately split
+      if rpm -e --test $tools >/dev/null 2>&1; then
+        rpm -e $tools
+        echo "removed unused base packages: $tools"
+      else
+        echo "kept $tools: an installed package depends on it"
+      fi
+    fi
+  fi
+}
+slim_image
 
 # Package-refresh stamp: the moment this layer upgraded the distro packages,
 # including the CA bundle. verify-relay.sh alerts (event ca-bundle-age) when it

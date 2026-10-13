@@ -1,0 +1,127 @@
+name: sasl-xoauth2 watch
+
+# Ubuntu, Debian and Alpine compile the XOAUTH2 plugin from the source vendored
+# in vendor/sasl-xoauth2, so no distro update ever changes it; this workflow is
+# how a new upstream release reaches them. Daily it compares upstream's newest
+# release-X.Y tag with vendor/sasl-xoauth2/UPSTREAM. When upstream is newer it:
+#   1. vendors that tag on a branch (vendor/sasl-xoauth2-<tag>) with update.sh,
+#   2. runs the full test suite (every distro, fresh packages, Trivy) on it,
+#   3. proposes it for review: a pull request, or an issue if this repository
+#      does not let GitHub Actions open pull requests.
+# Nothing is merged or released automatically: vendored code changes are read
+# by a person first. After merging, cut a release to publish it.
+# AlmaLinux images follow EPEL instead; publish-image.yml's daily refresh
+# rebuilds them when EPEL ships a newer sasl-xoauth2.
+on:
+  schedule:
+    - cron: "41 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sasl-xoauth2-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      branch: ${{ steps.check.outputs.branch }}
+      propose: ${{ steps.check.outputs.propose }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: check
+        run: |
+          repo=$(sed -n 's/^repo=//p' vendor/sasl-xoauth2/UPSTREAM)
+          current=$(sed -n 's/^tag=//p' vendor/sasl-xoauth2/UPSTREAM)
+          latest=$(git ls-remote --tags --refs "$repo" 'release-*' |
+            sed 's|.*refs/tags/||' | grep -E '^release-[0-9]+(\.[0-9]+)*$' | sort -V | tail -n1)
+          [ -n "$latest" ] || { echo "::error::could not list upstream release tags"; exit 1; }
+          newest=$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n1)
+          branch="vendor/sasl-xoauth2-$latest"
+          if [ "$latest" = "$current" ] || [ "$newest" = "$current" ]; then
+            echo "sasl-xoauth2: vendored $current is upstream's newest release" >> "$GITHUB_STEP_SUMMARY"
+            echo "propose=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # One proposal per release: a branch left by an earlier run means it
+          # is already waiting for review.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "sasl-xoauth2 $latest already proposed on $branch" >> "$GITHUB_STEP_SUMMARY"
+            echo "propose=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          vendor/sasl-xoauth2/update.sh "$latest"
+          vendor/sasl-xoauth2/update.sh --verify
+          git config user.name "sg1888"
+          git config user.email "sg1888@users.noreply.github.com"
+          git switch -c "$branch"
+          git add -A vendor/sasl-xoauth2
+          git commit -m "build(sasl-xoauth2): vendor upstream $latest" \
+            -m "Proposed by .github/workflows/sasl-xoauth2-watch.yml: upstream released $latest (vendored: $current)."
+          git push origin "$branch"
+          { echo "tag=$latest"; echo "branch=$branch"; echo "propose=true"; } >> "$GITHUB_OUTPUT"
+          echo "sasl-xoauth2: vendored $latest on $branch (was $current)" >> "$GITHUB_STEP_SUMMARY"
+
+  # The same suite CI and releases use, on the proposed branch, with fresh
+  # packages: the proposal arrives with its test result attached.
+  suite:
+    needs: check
+    if: needs.check.outputs.propose == 'true'
+    uses: ./.github/workflows/suite.yml
+    with:
+      ref: ${{ needs.check.outputs.branch }}
+      fresh: true
+
+  propose:
+    needs: [check, suite]
+    if: always() && needs.check.outputs.propose == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.check.outputs.branch }}
+          fetch-depth: 0
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.check.outputs.tag }}
+          BRANCH: ${{ needs.check.outputs.branch }}
+          SUITE: ${{ needs.suite.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          base=$(git show origin/main:vendor/sasl-xoauth2/UPSTREAM | sed -n 's/^version=//p')
+          {
+            echo "Upstream [tarickb/sasl-xoauth2](https://github.com/tarickb/sasl-xoauth2) released \`$TAG\`; this vendors it."
+            echo
+            echo "- Test suite on this branch (every distro, Trivy): **$SUITE** ([run]($RUN_URL))"
+            echo "- Vendored tree verified against upstream's commit (\`update.sh --verify\`)"
+            echo
+            echo "### Upstream ChangeLog since $base"
+            echo
+            echo '```'
+            sed "/(${base})/,\$d" vendor/sasl-xoauth2/src/ChangeLog
+            echo '```'
+            echo
+            echo "### Review before merging"
+            echo
+            echo "- Read the plugin code change: \`git diff main -- vendor/sasl-xoauth2/src/src\`"
+            echo "- After merging, cut a release so the Ubuntu, Debian and Alpine images ship it."
+          } > body.md
+          title="sasl-xoauth2: vendor upstream $TAG"
+          if gh pr create --base main --head "$BRANCH" --title "$title" --body-file body.md; then
+            exit 0
+          fi
+          # GitHub Actions may not be allowed to open pull requests here
+          # (Settings > Actions > General). An issue still notifies the maintainer.
+          {
+            cat body.md
+            echo
+            echo "Open the pull request: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...$BRANCH"
+          } > issue.md
+          gh issue create --title "$title" --body-file issue.md

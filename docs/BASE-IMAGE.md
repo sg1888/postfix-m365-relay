@@ -186,6 +186,23 @@ To move to a newer upstream release, run
 and PPA modes were removed: a checksum on a prebuilt `.deb` proves only that the
 file did not change, not what was compiled into it.
 
+### How plugin updates arrive
+
+The two sources update differently, and both are automatic up to a review:
+
+- **AlmaLinux (EPEL).** The build accepts any EPEL `sasl-xoauth2` at or above a
+  floor (`SXO_EPEL_MIN_VERSION` in `postfix-install.sh`, currently 0.27), never
+  an exact version. `sasl-xoauth2` is a key package in the daily refresh
+  (`publish-image.yml`, `.github/scripts/pending-updates.sh`): when EPEL ships a
+  newer one, the refresh rebuilds the Alma images with it, runs the full suite,
+  and publishes the next patch release. Nothing has to be edited.
+- **Ubuntu, Debian, Alpine (vendored source).** No distro update changes the
+  vendored copy. `.github/workflows/sasl-xoauth2-watch.yml` checks upstream's
+  tags daily; on a new `release-X.Y` it vendors it on a branch, runs the full
+  suite there, and opens a pull request (or an issue, if GitHub Actions may not
+  open pull requests in this repository) with the upstream ChangeLog. Merge it
+  after reading the diff, then cut a release.
+
 ### Why the plugin *version* barely matters
 
 This relay **disables sasl-xoauth2's token fetching** (its config points the
@@ -202,6 +219,31 @@ this relay disables. 0.28's other changes (Microsoft national-cloud endpoints,
 a simpler Google flow) are in `sasl-xoauth2-tool` and the docs, which this
 image does not ship. Upstream's record of each release is the `ChangeLog` file
 at the top of https://github.com/tarickb/sasl-xoauth2.
+
+## Image size
+
+| Image | Download (compressed) | On disk (unpacked) |
+|---|---|---|
+| `alpine` | ~30 MB | ~90 MB |
+| `debian` | ~65 MB | ~213 MB |
+| `latest` / `ubuntu` | ~78 MB | ~204 MB |
+| `alma-v3` / `alma-v2` | ~134 MB | ~282 MB |
+
+(arm64, October 2026. Docker may also keep the compressed layers next to the
+unpacked ones, depending on its image store.)
+
+The install step's `slim_image` removes what a mail relay never uses: docs and
+man pages (license texts stay), message catalogs, Python's pip bootstrapper,
+IDLE/Tk and test suites, every SASL mechanism except PLAIN, LOGIN and XOAUTH2,
+and AlmaLinux's unused `binutils`. `tests/container-image-size.sh` holds each
+image to a size budget and fails if trimmed content returns.
+
+What stays, and why: the package manager (the daily update check runs it inside
+each image), the distro's essential base packages, Python with `cryptography`
+(token minting, certificate rotation and alerts, roughly 35–45 MB of each
+image), ICU (Postfix links it for SMTPUTF8), and Python's bytecode caches
+(removing them would recompile the standard library on every token and alert
+run).
 
 ## What keeps the shared codebase distro-agnostic
 

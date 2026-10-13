@@ -127,6 +127,59 @@ jobs:
           path: updates.txt
           if-no-files-found: ignore
 
+  # GitHub disables scheduled workflows in a public repository after 60 days
+  # without repository activity, which would silently stop the refreshes. When
+  # main has had no commit for 45 days, the daily run commits an updated
+  # docs/REFRESH-STATUS.md (when it last checked, the newest release, what was
+  # pending). Authored as the maintainer. Pushed with GITHUB_TOKEN, which starts
+  # no workflow. GitHub still emails before disabling; re-enable it under
+  # Actions > publish image if that ever happens.
+  keepalive:
+    needs: plan
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          name: pending-updates
+        continue-on-error: true
+      - env:
+          RELEASE: ${{ needs.plan.outputs.base_version }}
+          PUBLISH: ${{ needs.plan.outputs.publish }}
+          NEXT: ${{ needs.plan.outputs.version }}
+        run: |
+          age_days=$(( ($(date +%s) - $(git log -1 --format=%ct)) / 86400 ))
+          echo "last commit on main: $age_days days ago"
+          [ "$age_days" -ge 45 ] || exit 0
+          {
+            echo "# Package refresh status"
+            echo
+            echo "Written by the daily run of \`.github/workflows/publish-image.yml\` when"
+            echo "\`main\` has had no commit for 45 days, so that GitHub keeps the schedule"
+            echo "enabled. See docs/RELEASING.md, \"Automatic package refreshes\"."
+            echo
+            echo "- Checked: $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "- Newest release: ${RELEASE:-unknown}"
+            if [ "$PUBLISH" = true ]; then
+              echo "- Result: releasing $NEXT"
+            else
+              echo "- Result: no key or security update pending"
+            fi
+            if [ -s updates.txt ]; then
+              echo; echo "## Pending updates"; echo; echo '```'; cat updates.txt; echo '```'
+            fi
+          } > docs/REFRESH-STATUS.md
+          git config user.name "sg1888"
+          git config user.email "sg1888@users.noreply.github.com"
+          git add docs/REFRESH-STATUS.md
+          git commit -m "chore: refresh status $(date -u +%Y-%m-%d)" -m "Keeps the scheduled package refresh enabled (GitHub disables schedules after 60 days without activity)."
+          git push origin HEAD:main
+
   # Release gate: the exact same suite as CI (host unit tests + both-variant
   # container suites + Trivy), built without layer cache so it tests today's
   # packages.

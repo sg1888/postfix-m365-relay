@@ -1,0 +1,10 @@
+# Provenance of src/: an unmodified copy of one upstream commit.
+# Written by update.sh; checked offline by tests/vendor-sasl-xoauth2.sh and
+# online by `update.sh --verify`. `tree` is Git's content hash of that
+# commit's file tree; src/ must hash to exactly this value.
+repo=https://github.com/tarickb/sasl-xoauth2.git
+tag=release-0.28
+version=0.28
+commit=35c732eca1eb67de04d417e77848a3326626fab2
+tree=6fb68d9718b5fd29b7154a1619e88ea4fcf2791a
+license=Apache-2.0 (src/COPYING)

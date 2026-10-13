@@ -33,13 +33,18 @@ jobs:
           ref: ${{ inputs.ref }}
       - name: Shell unit tests (bats)
         run: ./tests/bats-unit.sh
+      # Offline, tests/static.sh proves vendor/sasl-xoauth2/src matches the
+      # recorded tree hash. This adds the online half: upstream's commit really
+      # has that tree.
+      - name: Vendored sasl-xoauth2 matches upstream
+        run: vendor/sasl-xoauth2/update.sh --verify
 
   container:
     runs-on: ubuntu-latest
-    # Both base images are gated on every change. The runner is native amd64, so
-    # this is where the Ubuntu image gets real x86-64 validation (local arm64
-    # Macs can only emulate amd64, under which the Rust cryptography extension
-    # segfaults). fail-fast: false so one variant's failure still reports the other.
+    # Every base image is gated on every change. The runner is native amd64, so
+    # this is where the images get real x86-64 validation (local arm64 Macs can
+    # only emulate amd64, under which the Rust cryptography extension
+    # segfaults). fail-fast: false so one variant's failure still reports the others.
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +53,10 @@ jobs:
             base: ubuntu:24.04
           - variant: alma
             base: almalinux:10
+          - variant: debian
+            base: debian:trixie-slim
+          - variant: alpine
+            base: alpine:3.22
     steps:
       - uses: actions/checkout@v7
         with:
@@ -104,6 +113,8 @@ jobs:
       # credential logic. They never contact Microsoft or a production relay.
       - name: Offline Python credential tests
         run: ./tests/python-unit.sh postfix-m365-relay:test
+      - name: XOAUTH2 plugin provenance and loading
+        run: ./tests/container-sasl-plugin.sh postfix-m365-relay:test
       - name: Sender-name and regexp-map tests
         run: ./tests/container-sender-names.sh postfix-m365-relay:test
       - name: Optional-sender and sender-allowlist tests

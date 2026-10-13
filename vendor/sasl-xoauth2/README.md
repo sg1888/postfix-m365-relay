@@ -1,45 +1,60 @@
-# Vendored sasl-xoauth2 packages
+# Vendored sasl-xoauth2 source
 
-These are **upstream-built** `.deb` packages for
-[`sasl-xoauth2`](https://github.com/tarickb/sasl-xoauth2), committed here so the
-Ubuntu image build (`build/postfix-m365-relay/Dockerfile` with
-`--build-arg BASE_IMAGE=ubuntu:24.04`, default `SXO_SOURCE=vendored`) never
-depends on a third-party server being online.
+`src/` is an **unmodified** copy of one commit of
+[tarickb/sasl-xoauth2](https://github.com/tarickb/sasl-xoauth2), the Cyrus SASL
+plugin that presents the relay's OAuth token to Microsoft 365 as XOAUTH2.
+[`UPSTREAM`](UPSTREAM) records which commit (tag, version, commit id, and Git
+tree hash).
 
-They are **not compiled by us** — they are the exact artifacts the maintainer
-published to the Launchpad PPA `ppa:sasl-xoauth2/stable`. Vendoring them protects
-against the PPA going offline, being deleted, or the single maintainer stepping
-away: the bytes we ship are frozen and checksum-pinned in `SHA256SUMS`.
+## How it is used
 
-## What's here
+The Ubuntu, Debian and Alpine images compile the plugin from this directory in a
+builder stage (`build/postfix-m365-relay/build-scripts/sasl-xoauth2-build.sh`).
+The build fetches no source from the network; it only installs the distro's
+compiler and libraries. It runs upstream's own unit tests, then copies just the
+plugin `.so` into the image. The AlmaLinux images do not use this copy: they
+install EPEL's signed `sasl-xoauth2` package.
 
-| File | For | Version |
-|------|-----|---------|
-| `sasl-xoauth2_0.27-1ubuntu1~noble1~ppa1_amd64.deb` | Ubuntu 24.04 (noble), amd64 | 0.27 |
-| `sasl-xoauth2_0.27-1ubuntu1~noble1~ppa1_arm64.deb` | Ubuntu 24.04 (noble), arm64 | 0.27 |
-| `SHA256SUMS` | integrity pin, verified at build time | — |
+At build time a single line of `src/CMakeLists.txt` is removed in a scratch copy
+(`add_subdirectory(docs)`, which needs pandoc to render man pages). This
+directory itself is never edited.
 
-The build verifies the checksum before installing (`sha256sum -c`), so a
-corrupted or swapped file fails the build rather than shipping silently.
+## Why vendored
 
-## Why 0.27 is fine (and why the version barely matters here)
+- **Auditable.** The code that is compiled is in this repository, reviewable in
+  a normal diff when it changes.
+- **Reproducible.** A build does not depend on GitHub, or on upstream keeping a
+  tag or the repository online.
+- **Provably unmodified.** `UPSTREAM` carries Git's tree hash of the upstream
+  commit. Two directories have the same tree hash only if every file's bytes,
+  name and executable bit match, so the check below proves `src/` is exactly
+  upstream's code without trusting anything outside this repository.
 
-This relay **disables sasl-xoauth2's own token fetching** — its config points the
-token endpoint at a dead address and the relay mints tokens itself. sasl-xoauth2
-is used only to *present* a pre-minted token as the XOAUTH2 SASL mechanism. The
-token-store JSON format (`access_token` + `expiry`) and that presenter have been
-stable since early releases, so any version from ~0.20 up serves identically.
-0.27 is simply the newest available and includes a 0.24 segfault-in-logging fix
-worth having. Full analysis: `docs/BASE-IMAGE.md`.
+## Checks
+
+```bash
+vendor/sasl-xoauth2/update.sh --check    # offline: src/ hashes to UPSTREAM's tree
+vendor/sasl-xoauth2/update.sh --verify   # online: and upstream's commit has that tree
+```
+
+`tests/vendor-sasl-xoauth2.sh` runs `--check` (it is part of `tests/static.sh`);
+the CI suite also runs `--verify`. Each image records the version and commit it
+was compiled from in `/usr/share/postfix-m365-relay/sasl-xoauth2.source`, and
+`tests/container-sasl-plugin.sh` checks that it matches `UPSTREAM`.
+
+## Updating
+
+```bash
+vendor/sasl-xoauth2/update.sh release-0.29     # replaces src/, rewrites UPSTREAM
+git diff -- vendor/sasl-xoauth2                # read what upstream changed
+```
+
+Then run `tests/run-matrix.sh`; `tests/container-sasl-plugin.sh` checks each
+image was compiled from exactly the new `UPSTREAM` commit. Read upstream's
+`ChangeLog` (first entries of `src/ChangeLog`) for what changed.
 
 ## License
 
-sasl-xoauth2 is open source (Apache-2.0). Redistributing these binaries is
-permitted; the license and copyright travel inside each `.deb`
-(`/usr/share/doc/sasl-xoauth2/copyright`).
-
-## Refreshing / adding a series
-
-Run `./refresh.sh` to re-download the pinned files and regenerate `SHA256SUMS`,
-or edit the `WANT` list inside it to pull a different version or Ubuntu series.
-Review the checksum diff before committing.
+sasl-xoauth2 is Copyright 2020 Google LLC, licensed under the Apache License,
+Version 2.0; see [`src/COPYING`](src/COPYING). It is redistributed here
+unmodified.

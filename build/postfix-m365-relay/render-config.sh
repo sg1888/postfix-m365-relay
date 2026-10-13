@@ -245,7 +245,20 @@ case "$MAIL_INBOUND_TLS" in off) tls_level=none ;; may) tls_level=may ;; require
 # a hostile main.cf with `mynetworks = 0.0.0.0/0` and proves these values win.
 awk '/^# >>> postfix-m365-relay \(managed\) >>>$/{skip=1} !skip{print} /^# <<< postfix-m365-relay \(managed\) <<<$/{skip=0}' /etc/postfix/main.cf > /etc/postfix/main.cf.clean
 mv /etc/postfix/main.cf.clean /etc/postfix/main.cf
-managed_keys=(relayhost mynetworks smtpd_client_restrictions smtpd_relay_restrictions smtpd_recipient_restrictions smtpd_sender_restrictions sender_canonical_maps sender_canonical_classes smtp_header_checks smtp_sasl_auth_enable smtp_sasl_password_maps smtp_sasl_security_options smtp_sasl_mechanism_filter smtp_tls_security_level smtp_tls_CAfile smtp_tls_loglevel local_recipient_maps local_transport alias_maps alias_database smtpd_sasl_auth_enable smtpd_sasl_type smtpd_sasl_path smtpd_sasl_local_domain smtpd_sasl_security_options smtpd_sasl_tls_security_options smtpd_tls_auth_only broken_sasl_auth_clients smtpd_tls_security_level smtpd_tls_cert_file smtpd_tls_key_file smtpd_tls_chain_files smtpd_tls_loglevel)
+# The directory holding this image's Cyrus SASL smtpd.conf (written at build by
+# build-scripts/postfix-install.sh): /etc/postfix/sasl on Debian/Ubuntu,
+# /etc/sasl2 on AlmaLinux/Alpine. Set explicitly because main.cf is generated
+# above, so a package default for it is gone, and Debian 13's libsasl2 no longer
+# searches /etc/postfix/sasl on its own.
+sasl_config_dir=
+for dir in /etc/postfix/sasl /etc/sasl2; do
+  if [[ -s $dir/smtpd.conf ]]; then
+    sasl_config_dir=$dir
+    break
+  fi
+done
+[[ $auth_enabled == no || -n $sasl_config_dir ]] || fail "SASL smtpd.conf not found in /etc/postfix/sasl or /etc/sasl2"
+managed_keys=(relayhost mynetworks smtpd_client_restrictions smtpd_relay_restrictions smtpd_recipient_restrictions smtpd_sender_restrictions sender_canonical_maps sender_canonical_classes smtp_header_checks smtp_sasl_auth_enable smtp_sasl_password_maps smtp_sasl_security_options smtp_sasl_mechanism_filter smtp_tls_security_level smtp_tls_CAfile smtp_tls_loglevel local_recipient_maps local_transport alias_maps alias_database smtpd_sasl_auth_enable smtpd_sasl_type smtpd_sasl_path cyrus_sasl_config_path smtpd_sasl_local_domain smtpd_sasl_security_options smtpd_sasl_tls_security_options smtpd_tls_auth_only broken_sasl_auth_clients smtpd_tls_security_level smtpd_tls_cert_file smtpd_tls_key_file smtpd_tls_chain_files smtpd_tls_loglevel)
 for key in "${managed_keys[@]}"; do postconf -X "$key" 2>/dev/null || true; done
 {
   echo '# >>> postfix-m365-relay (managed) >>>'
@@ -280,6 +293,7 @@ for key in "${managed_keys[@]}"; do postconf -X "$key" 2>/dev/null || true; done
   if [[ $auth_enabled == yes ]]; then
     echo 'smtpd_sasl_type = cyrus'
     echo 'smtpd_sasl_path = smtpd'
+    echo "cyrus_sasl_config_path = $sasl_config_dir"
     echo "smtpd_sasl_local_domain = $MAIL_RELAY_DOMAIN"
     echo 'smtpd_sasl_security_options = noanonymous, noplaintext'
     echo 'smtpd_sasl_tls_security_options = noanonymous'

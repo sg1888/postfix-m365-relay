@@ -1,0 +1,445 @@
+#!/usr/bin/python3
+# PYTHON_ARGCOMPLETE_OK
+# -*- coding: utf-8 -*-
+
+import argparse
+import http
+import http.server
+import json
+import logging
+import msal
+import os
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+
+from typing import Optional,Dict,Union,IO,Any
+
+try:
+    import argcomplete #type: ignore
+except ImportError:
+    argcomplete = None
+
+##########
+
+# These are set by CMake at project build time.
+
+TEST_TOOL_PATH = '${CMAKE_INSTALL_FULL_LIBDIR}/${PROJECT_NAME}/test-config'
+DEFAULT_CONFIG_FILE = '${CMAKE_INSTALL_FULL_SYSCONFDIR}/${PROJECT_NAME}.conf'
+
+##########
+
+GOOGLE_OAUTH2_AUTH_URL = 'https://accounts.google.com/o/oauth2/auth'
+GOOGLE_OAUTH2_TOKEN_URL = 'https://accounts.google.com/o/oauth2/token'
+GOOGLE_OAUTH2_RESULT_PATH = '/oauth2_result'
+
+
+def url_safe_escape(instring:str) -> str:
+    return urllib.parse.quote(instring, safe='~-._')
+
+
+def dump_overwrite(token:dict, output_filename:str, input_dict:dict):
+    # overwrite fields in previous token (represented by input_dict)
+    # that also have values from new token
+    input_dict.update(token)
+    with open(output_filename,'w') as output_file:
+        json.dump(input_dict, output_file, indent=4)
+
+
+def gmail_redirect_uri(local_port:int) -> str:
+    return 'http://127.0.0.1:%d%s' % (local_port, GOOGLE_OAUTH2_RESULT_PATH)
+
+
+def gmail_get_auth_url(client_id:str, scope:str, local_port:int) -> str:
+    client_id = url_safe_escape(client_id)
+    scope = url_safe_escape(scope)
+    redirect_uri = url_safe_escape(gmail_redirect_uri(local_port))
+    return '{}?client_id={}&scope={}&response_type={}&redirect_uri={}'.format(
+        GOOGLE_OAUTH2_AUTH_URL, client_id, scope, 'code', redirect_uri)
+
+
+def gmail_get_token_from_code(client_id:str, client_secret:str, authorization_code:str, local_port:int) -> Any:
+    params = {}
+    params['client_id'] = client_id
+    params['client_secret'] = client_secret
+    params['code'] = authorization_code
+    params['redirect_uri'] = gmail_redirect_uri(local_port)
+    params['grant_type'] = 'authorization_code'
+    data = urllib.parse.urlencode(params)
+    response = urllib.request.urlopen(GOOGLE_OAUTH2_TOKEN_URL, data.encode('ascii')).read()
+    return json.loads(response)
+
+
+def gmail_get_RequestHandler(client_id:str, client_secret:str, output_filename:str, forward_url:str, input_dict:dict) -> type:
+    class GMailRequestHandler(http.server.BaseHTTPRequestHandler):
+        def log_request(self, code:Union[int,str]='-', size:Union[int,str]='-') -> None:
+            # Silence request logging.
+            return
+
+        def do_GET(self) -> None:
+            parse = urllib.parse.urlparse(self.path)
+            if parse.path == '/auth':
+              self.handle_initial_auth(parse)
+            elif parse.path == GOOGLE_OAUTH2_RESULT_PATH:
+              self.handle_google_response(parse)
+
+        def handle_initial_auth(self, parse:urllib.parse.ParseResult) -> None:
+            if not forward_url:
+              print("No forwarding URL!", file=sys.stderr)
+              return
+            self.send_response(302)
+            self.send_header('Location', forward_url)
+            self.end_headers()
+
+        def handle_google_response(self, parse:urllib.parse.ParseResult) -> None:
+            qs = urllib.parse.parse_qs(parse.query)
+            if 'code' not in qs:
+                print(f"Invalid query string in response '{qs}'", file=sys.stderr)
+                return
+            if len(qs['code']) != 1:
+                print(f"Invalid query string code in response '{qs}'", file=sys.stderr)
+                return
+            code = qs['code'][0]
+
+            response_code = 400
+            response_text = '<html><head><title>Error</title></head><body><h1>Invalid request.</h1></body></html>'
+
+            if code:
+                response_code = 200
+                response_text = '<html><head><title>Done</title></head><body><h1>You may close this window now.</h1></body></html>'
+
+            self.send_response(response_code)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(response_text.encode('utf8'))
+
+            if code:
+                token = gmail_get_token_from_code(
+                    client_id,
+                    client_secret,
+                    code,
+                    self.server.server_address[1],
+                )
+                dump_overwrite(token, output_filename, input_dict)
+                print(f"Wrote token to {output_filename}.", file=sys.stderr)
+                os._exit(0)
+
+    return GMailRequestHandler
+
+
+def get_token_gmail(client_id:str, client_secret:str, scope:str, output_filename:str, local_listen_port:int, input_dict:dict) -> None:
+    forward_url = gmail_get_auth_url(client_id, scope, local_listen_port)
+    request_handler_class = gmail_get_RequestHandler(
+        client_id,
+        client_secret,
+        output_filename,
+        forward_url,
+        input_dict,
+    )
+    server = http.server.ThreadingHTTPServer(('', local_listen_port), request_handler_class)
+
+    url = f'http://localhost:{local_listen_port}/auth'
+    print(f"Please open this URL in a browser ON THIS HOST (or that has port {local_listen_port} forwarded to this host):\n\n{url}\n", file=sys.stderr)
+
+    server.serve_forever()
+
+##########
+
+
+# Predefined cloud configurations for Microsoft 365 national clouds.
+# Each entry maps a cloud name to its login base URL and SMTP scope.
+OUTLOOK_CLOUD_CONFIGS = {
+    "public": {
+        "login_base": "https://login.microsoftonline.com",
+        "scope": "openid offline_access https://outlook.office.com/SMTP.Send",
+    },
+    "usgov": {
+        "login_base": "https://login.microsoftonline.us",
+        "scope": "openid offline_access https://outlook.office365.us/SMTP.Send",
+    },
+    "usgov-dod": {
+        "login_base": "https://login.microsoftonline.us",
+        "scope": "openid offline_access https://outlook.office365.us/SMTP.Send",
+    },
+    "china": {
+        "login_base": "https://login.partner.microsoftonline.cn",
+        "scope": "openid offline_access https://partner.outlook.cn/SMTP.Send",
+    },
+}
+
+
+def outlook_get_cloud_config(cloud:str, login_base_override:Optional[str], scope_override:Optional[str]) -> Dict[str,str]:
+    """Resolve cloud config: explicit overrides take precedence over presets."""
+    if cloud not in OUTLOOK_CLOUD_CONFIGS:
+        raise Exception(f"Unknown cloud '{cloud}'. Known clouds: {', '.join(OUTLOOK_CLOUD_CONFIGS.keys())}")
+    config = dict(OUTLOOK_CLOUD_CONFIGS[cloud])
+    if login_base_override:
+        config["login_base"] = login_base_override
+        if not scope_override:
+            print(f"Warning: --login-base is set but --scope is not. The default scope "
+                  f"from the '{cloud}' cloud preset will be used. If your environment "
+                  f"uses a different mail domain, you may also need --scope.",
+                  file=sys.stderr)
+    if scope_override:
+        config["scope"] = scope_override
+    return config
+
+
+def outlook_get_authorization_code(client_id:str, tenant:str, cloud_config:Dict[str,str]) -> str:
+    login_base = cloud_config["login_base"]
+    scope = cloud_config["scope"]
+    redirect_uri = f"{login_base}/common/oauth2/nativeclient"
+    url = f"{login_base}/{tenant}/oauth2/v2.0/authorize"
+    query:Dict[str,str] = {}
+    query['client_id'] = client_id
+    query['response_type'] = 'code'
+    query['redirect_uri'] = redirect_uri
+    query['response_mode'] = 'query'
+    query['scope'] = scope
+
+    print("Please visit the following link in a web browser, then paste the resulting URL:\n\n" +
+          f"{url}?{urllib.parse.urlencode(query)}\n",
+          file=sys.stderr)
+
+    resulting_url_input:str = input("Resulting URL: ")
+    if redirect_uri not in resulting_url_input:
+        raise Exception(f"Resulting URL does not contain expected prefix: {redirect_uri}")
+    resulting_url = urllib.parse.urlparse(resulting_url_input)
+    code = urllib.parse.parse_qs(resulting_url.query)
+    if "code" not in code:
+        raise Exception(f"Missing code in result: {resulting_url.query}")
+    return code["code"][0]
+
+
+def outlook_get_initial_tokens(client_id:str, client_secret:str, tenant:str, code:str, cloud_config:Dict[str,str]) -> Dict[str,Union[str,int]]:
+    login_base = cloud_config["login_base"]
+    scope = cloud_config["scope"]
+    redirect_uri = f"{login_base}/common/oauth2/nativeclient"
+    url = f"{login_base}/{tenant}/oauth2/v2.0/token"
+    token_request:Dict[str,str] = {}
+    token_request['client_id'] = client_id
+    if len(client_secret) > 0:
+      token_request['client_secret'] = client_secret
+    token_request['scope'] = scope
+    token_request['code'] = code
+    token_request['redirect_uri'] = redirect_uri
+    token_request['grant_type'] = 'authorization_code'
+    resp = urllib.request.urlopen(
+        urllib.request.Request(
+            url,
+            data=urllib.parse.urlencode(token_request).encode('ascii'),
+            headers={ "Content-Type": "application/x-www-form-urlencoded" }))
+    if resp.code != 200:
+        raise Exception(f"Request failed: {resp.code}")
+    try:
+        content = json.load(resp)
+        return {
+            'access_token': content["access_token"],
+            'refresh_token': content["refresh_token"],
+            'expiry': 0,
+        }
+    except:
+        raise Exception(f"Tokens not found in response: {content}")
+
+
+def outlook_get_initial_tokens_by_device_flow(client_id:str, tenant:str, cloud_config:Dict[str,str]) -> Dict[str,Union[str,int]]:
+    login_base = cloud_config["login_base"]
+    scope = cloud_config["scope"]
+    authority = f"{login_base}/{tenant}"
+    app = msal.PublicClientApplication(client_id, authority=authority)
+    flow = app.initiate_device_flow([scope])
+    if "user_code" not in flow:
+        raise Exception("Failed to create device flow. Ensure that public client flows are enabled for the application. Flow: %s" % json.dumps(flow, indent=4))
+    print(flow["message"])
+    sys.stdout.flush()
+    result = app.acquire_token_by_device_flow(flow)
+    if "access_token" not in result or "refresh_token" not in result:
+        raise Exception("Failed to acquire token. Result: %s" % json.dumps(result, indent=4))
+    print("Acquired token.")
+    return {
+        'access_token': result["access_token"],
+        'refresh_token': result["refresh_token"],
+        'expiry': 0,
+    }
+
+
+def get_token_outlook(client_id:str, client_secret:str, tenant:str, use_device_flow:bool, output_filename:str, input_dict:dict, cloud_config:Dict[str,str]) -> None:
+    if use_device_flow:
+        tokens = outlook_get_initial_tokens_by_device_flow(client_id, tenant, cloud_config)
+    else:
+        code = outlook_get_authorization_code(client_id, tenant, cloud_config)
+        tokens = outlook_get_initial_tokens(client_id, client_secret, tenant, code, cloud_config)
+    dump_overwrite(tokens, output_filename, input_dict)
+
+##########
+
+
+parser = argparse.ArgumentParser()
+subparse = parser.add_subparsers()
+
+
+def argparse_get_parser() -> argparse.ArgumentParser:
+  return parser
+
+
+def subcommand_get_token(args:argparse.Namespace) -> None:
+    input_dict = {}
+    if args.overwrite_existing_token:
+        if not os.path.isfile(args.output_file):
+            raise Exception("Cannot overwrite nonexistent token file {}".format(args.output_file))
+        else:
+            with open(args.output_file,'r') as input_file:
+                input_dict = json.load(input_file)
+    if args.service == 'outlook':
+        if not args.tenant:
+            parser.error("'outlook' service requires 'tenant' argument.")
+        if not (args.client_secret or str(args.client_secret) == '') and not args.use_device_flow:
+            args.client_secret = input('Please enter OAuth2 client secret (not always required; Azure docs are unclear): ')
+        cloud_config = outlook_get_cloud_config(args.cloud, args.login_base, args.scope)
+        get_token_outlook(
+            args.client_id,
+            args.client_secret,
+            args.tenant,
+            args.use_device_flow,
+            args.output_file,
+            input_dict,
+            cloud_config,
+        )
+    elif args.service == 'gmail':
+        if args.cloud != 'public' or args.login_base:
+            print("Warning: --cloud and --login-base are only used with the 'outlook' service and will be ignored.",
+                  file=sys.stderr)
+        if not args.client_secret:
+            args.client_secret = input('Please enter OAuth2 client secret: ')
+        if not args.client_secret:
+            parser.error("'gmail' service requires 'client-secret' argument.")
+        if not args.scope:
+            parser.error("'gmail' service requires 'scope' argument.")
+        get_token_gmail(
+            args.client_id,
+            args.client_secret,
+            args.scope,
+            args.output_file,
+            args.local_listen_port,
+            input_dict,
+        )
+
+
+sp_get_token = subparse.add_parser('get-token', description='Fetches initial access and refresh tokens from an OAuth 2 provider')
+sp_get_token.set_defaults(func=subcommand_get_token)
+sp_get_token.add_argument(
+    'service', choices=['outlook', 'gmail'],
+    help="service type",
+)
+sp_get_token.add_argument(
+    '--client-id', required=True,
+    help="required for both services",
+)
+sp_get_token.add_argument(
+    '--tenant', default='consumers',
+    help="wanted by 'outlook' (defaults to 'consumers')",
+)
+sp_get_token.add_argument(
+    '--client-secret',
+    help="required for both services, will prompt the user if blank",
+)
+sp_get_token.add_argument(
+    "--use-device-flow",
+    default=False,
+    action='store_true',
+    help="use simplified device flow for Outlook/Azure",
+)
+sp_get_token.add_argument(
+    '--cloud', default='public',
+    choices=list(OUTLOOK_CLOUD_CONFIGS.keys()),
+    help="Microsoft 365 cloud environment (default: public). "
+         "Use 'usgov' for US Government GCC High, 'usgov-dod' for US Government DoD, "
+         "or 'china' for 21Vianet. Only used with 'outlook' service.",
+)
+sp_get_token.add_argument(
+    '--login-base',
+    help="override the Entra login base URL (e.g. https://login.microsoftonline.us). "
+         "Takes precedence over --cloud. Only used with 'outlook' service.",
+)
+sp_get_token.add_argument(
+    '--scope',
+    help="for 'gmail': required OAuth2 scope. "
+         "For 'outlook': override the default scope from --cloud "
+         "(e.g. 'openid offline_access https://outlook.office365.us/SMTP.Send').",
+)
+sp_get_token.add_argument(
+    '--overwrite-existing-token',
+    default=False,
+    action='store_true',
+    help='overwrite existing token file (preserves extra fields)',
+)
+sp_get_token.add_argument(
+    '--local-listen-port', type=int, default=54332,
+    help='port to launch local http listener on',
+)
+sp_get_token.add_argument(
+    'output_file', nargs='?', type=str, default='-',
+    help="output file, '-' for stdout",
+)
+
+
+def subcommand_test_config(args:argparse.Namespace) -> None:
+  subprocess_args = [TEST_TOOL_PATH]
+  if args.config_file:
+    subprocess_args.extend(['--config', args.config_file])
+  result = subprocess.run(subprocess_args, shell=False)
+  sys.exit(result.returncode)
+
+
+sp_test_config = subparse.add_parser('test-config', description='Tests a sasl-xoauth2 config file for syntax errors')
+sp_test_config.set_defaults(func=subcommand_test_config)
+sp_test_config.add_argument(
+    '--config-file',
+    help="config file path (defaults to '%s')" % DEFAULT_CONFIG_FILE,
+)
+
+
+def subcommand_test_token_refresh(args:argparse.Namespace) -> None:
+  subprocess_args = [TEST_TOOL_PATH, '--token', args.token_file]
+  if args.config_file:
+    subprocess_args.extend(['--config', args.config_file])
+  result = subprocess.run(subprocess_args, shell=False)
+  sys.exit(result.returncode)
+
+
+sp_test_token_refresh = subparse.add_parser('test-token-refresh', description='Tests that a token can be refreshed (i.e., that the OAuth 2 flow is working correctly)')
+sp_test_token_refresh.set_defaults(func=subcommand_test_token_refresh)
+sp_test_token_refresh.add_argument(
+    '--config-file',
+    help="config file path (defaults to '%s')" % DEFAULT_CONFIG_FILE,
+)
+sp_test_token_refresh.add_argument(
+    'token_file',
+    help="file containing initial access token",
+)
+
+##########
+
+
+def main() -> None:
+    if argcomplete:
+        argcomplete.autocomplete(parser)
+    elif '_ARGCOMPLETE' in os.environ:
+        logging.error('Argument completion requested but the "argcomplete" '
+                      'module is not installed. '
+                      'Maybe you want to "apt install python3-argcomplete"')
+        sys.exit(1)
+    try:
+      args = parser.parse_intermixed_args()
+    except:
+      args = parser.parse_args()
+    if hasattr(args, 'func'):
+      args.func(args)
+    else:
+      parser.print_help()
+      sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

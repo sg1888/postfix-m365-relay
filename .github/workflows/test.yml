@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  # The full suite (host unit tests + both-variant container suites + Trivy scan)
+  # The full suite (host unit tests + every-variant container suites + Trivy scan)
   # lives in the reusable suite.yml so publish-image.yml can gate releases on the
   # exact same definition. Running it here on every PR/push keeps that shared
   # definition continuously exercised.

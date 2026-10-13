@@ -472,6 +472,8 @@ Tier 2 works because sasldb2 rebuilds in `/run/mail-relay`.
 
 ## Images
 
-The default `latest` (Ubuntu) runs on any x86-64 and arm64. For the AlmaLinux
-builds use `alma-v3` (AVX2) or `alma-v2` (SSE4.2, amd64 only). Docker Hub is
-primary; GHCR mirrors the release. Pin by digest after testing.
+The default `latest` (Ubuntu) runs on any x86-64 and arm64, and so do `debian`
+(Postfix 3.10) and `alpine` (smallest image). For the AlmaLinux builds use
+`alma-v3` (AVX2) or `alma-v2` (SSE4.2, amd64 only). 32-bit platforms are not
+built. Docker Hub is primary; GHCR mirrors the release. Pin by digest after
+testing.

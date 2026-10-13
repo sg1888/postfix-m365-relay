@@ -2,8 +2,8 @@
 
 This document explains **why the image is built the way it is**, why a stock
 virtual machine can fail to start an AlmaLinux build, and how one Dockerfile
-serves both base distros. It exists because these decisions are non-obvious and
-have bitten real deployments.
+serves four base distros (Ubuntu, Debian, Alpine, AlmaLinux). It exists
+because these decisions are non-obvious and have bitten real deployments.
 
 ## The symptom
 
@@ -61,11 +61,25 @@ all, so the default puller never hits this trap.
 
 ## Choosing an image
 
-| Your CPU / VM | Use |
-|---------------|-----|
+| Your machine | Use |
+|--------------|-----|
 | Anything (default) — any x86-64 incl. default-CPU VMs, budget chips, arm64 | `:latest` / `:ubuntu` (universal) |
+| Same CPUs, want newer Postfix (3.10) on glibc | `:debian` (amd64 + arm64) |
+| Want the smallest image | `:alpine` (amd64 + arm64) |
 | Has AVX2, want the AlmaLinux build | `:alma-v3` (amd64 + arm64) |
 | Has SSE4.2 but not AVX2, want the AlmaLinux build | `:alma-v2` (amd64 only) |
+
+### ARM and Raspberry Pi
+
+Every tag except `alma-v2` includes `linux/arm64`. That covers the Raspberry Pi
+3, 4, 5, Zero 2 W and Pi 2 v1.2 **on a 64-bit OS**; `uname -m` must print
+`aarch64`. If it prints `armv7l` or `armv6l`, install the 64-bit Raspberry Pi OS
+(Pi 3 and later, Zero 2 W).
+
+32-bit ARM images are deliberately not built. Docker Engine 29 and later ship no
+packages for 32-bit Raspberry Pi OS, and ARMv6 boards (Pi 1, Zero, Zero W) get
+no official Docker packages at all; the original Pi 2 (v1.1) is the only board
+left out.
 
 The default `:latest` runs everywhere, so most people never need to choose. The
 `alma-*` tags are opt-in for users who specifically want the AlmaLinux base. Quick
@@ -81,69 +95,96 @@ Raising a VM's virtual CPU (e.g. Proxmox "Type: host", libvirt
 expecting every user to change hypervisor settings is a poor out-of-box story,
 which is why the universal Ubuntu build is the default.
 
-## One Dockerfile, two base distros
+## One Dockerfile, four base distros
 
-Both variants are built from a **single** `build/postfix-m365-relay/Dockerfile`.
+Every variant is built from a **single** `build/postfix-m365-relay/Dockerfile`.
 The base distro is selected by a build arg:
 
 ```bash
 docker build -f build/postfix-m365-relay/Dockerfile \
-  --build-arg BASE_IMAGE=ubuntu:24.04   -t relay:ubuntu .   # default :latest build
+  --build-arg BASE_IMAGE=ubuntu:24.04        -t relay:ubuntu .   # default :latest build
 docker build -f build/postfix-m365-relay/Dockerfile \
-  --build-arg BASE_IMAGE=almalinux:10   -t relay:alma-v3 .  # opt-in AlmaLinux build
+  --build-arg BASE_IMAGE=debian:trixie-slim  -t relay:debian .
+docker build -f build/postfix-m365-relay/Dockerfile \
+  --build-arg BASE_IMAGE=alpine:3.22         -t relay:alpine .
+docker build -f build/postfix-m365-relay/Dockerfile \
+  --build-arg BASE_IMAGE=almalinux:10        -t relay:alma-v3 .  # opt-in AlmaLinux build
 ```
 
-The Dockerfile itself carries **no** `apk`/`apt`/`dnf` conditionals. All the
-per-distro build logic — package install, sasl-xoauth2 sourcing, and the sasl
-`smtpd.conf` seeding — lives in `build-scripts/postfix-install.sh`, which is
-bind-mounted at build time and dispatches on the package manager present:
+The Dockerfile itself carries **no** `apk`/`apt`/`dnf` conditionals. The
+per-distro logic lives in two bind-mounted scripts that dispatch on the package
+manager present:
+
+- `build-scripts/sasl-xoauth2-build.sh` runs in a **builder stage** on the same
+  base and compiles the XOAUTH2 plugin (below). It does nothing on AlmaLinux.
+- `build-scripts/postfix-install.sh` runs in the runtime stage: package install,
+  plugin install, and the sasl `smtpd.conf` seeding.
 
 ```sh
-if command -v rpm && command -v dnf; then do_alma      # EPEL 0.27, arch assertions
-elif command -v apt-get;             then do_ubuntu    # vendored .deb, checksum
+if command -v rpm && command -v dnf; then do_alma   # EPEL 0.27, arch assertions
+elif command -v apt-get;             then do_apt    # Ubuntu, Debian
+elif command -v apk;                 then do_apk    # Alpine
 fi
 ```
 
 **Why one file matters:** the runtime scripts are COPYed into the image by a
-single COPY list shared by both distros. Previously two Dockerfiles each carried
+single COPY list shared by every distro. Previously two Dockerfiles each carried
 their own COPY list, and a runtime file (`cert-action.sh`) once shipped to only
 one image because a single list was updated. One Dockerfile makes that class of
 drift impossible — a new runtime file is added once and reaches every variant.
 
 The AlmaLinux-only microarch machinery (the `alma-v2` altarch EPEL release RPM,
 `EXPECT_ALMALINUX_ARCH` guard, and the RPM arch/release assertions) lives inside
-`do_alma`; it is inert on the Ubuntu path.
+`do_alma`; it is inert on every other path.
 
-### Why Ubuntu (not Debian) for the universal build
+### Why Ubuntu for the universal build
 
 **Ubuntu is compiled at the original x86-64 baseline (v1).** A v1 image runs on
 *every* x86-64 CPU, including the default QEMU virtual CPU. So one `linux/amd64`
 image works everywhere — **no v2/v3 split, nothing to auto-detect** — with
-`linux/arm64` published alongside. This dissolves the whole problem rather than
-managing it with tags, which is why Ubuntu owns the default/`latest` tags.
+`linux/arm64` published alongside. Debian and Alpine share that v1 baseline, so
+either could take the default; Ubuntu holds it because existing deployments run
+it and 24.04 has the longest standard support of the three (to 2029).
 
-`sasl-xoauth2` (the plugin this relay is built around) is **not in Debian
-stable/testing** — only in Debian `experimental` at the old 0.20. It is likewise
-**not in Ubuntu's main archive**. The maintainer distributes current versions
-through a **Launchpad PPA** (`ppa:sasl-xoauth2/stable`) built for Ubuntu series,
-and through **EPEL** for the RPM world (which is what the AlmaLinux image uses).
-So Ubuntu is the distro where we can get a recent plugin **without compiling**.
+### How the plugin is obtained
 
-### How the plugin is obtained — three explicit modes
+`sasl-xoauth2` (the plugin this relay is built around) is packaged by **EPEL**
+for the RPM world, which is what the AlmaLinux image installs: a signed build
+from a public spec file. Debian and Alpine do not package it, and Ubuntu has it
+only in the maintainer's PPA. (Alpine's `cyrus-sasl-xoauth2` in `edge/testing`
+is a different, unrelated plugin that takes the raw token as the password; it
+does not work with this relay's token-file design.)
 
-The Ubuntu path exposes `--build-arg SXO_SOURCE=` with three documented choices,
-so the sourcing decision is auditable rather than hidden:
+Every non-Alma image therefore **compiles it from source**, in a builder stage,
+from a copy of the upstream source kept in this repository
+([`vendor/sasl-xoauth2`](../vendor/sasl-xoauth2/README.md)):
 
-| Mode | What it does | Trade-off |
-|------|--------------|-----------|
-| **`vendored`** (default) | Installs the `.deb` committed in `vendor/sasl-xoauth2/`, checksum-verified | No build-time network dependency; bytes pinned. Manual refresh for updates. **Supply-chain-safe default.** |
-| `ppa` | `add-apt-repository ppa:sasl-xoauth2/stable` then apt-install | Always current, but the build **fails if the PPA is offline/removed**, and trusts a single-maintainer archive at build time |
-| `source` | Compiles from a pinned upstream tag (`SXO_SOURCE_REF`) | No third-party binary at all, at the cost of a build toolchain and the maintenance the project otherwise avoids |
+- `vendor/sasl-xoauth2/src` is an **unmodified** upstream commit.
+  `vendor/sasl-xoauth2/UPSTREAM` records its tag, version, commit id and Git
+  tree hash. `tests/static.sh` proves offline that the directory hashes to that
+  tree (any changed byte, file or executable bit changes the hash); the CI suite
+  also confirms online that upstream's commit has that tree.
+- The build fetches no source over the network. It verifies the tree against
+  `vendor/sasl-xoauth2/SHA256SUMS` (every file, no extras) and refuses to
+  compile anything else.
+- Upstream's own unit tests run (`ctest`) on the target architecture before
+  anything ships.
+- Only the plugin `.so` leaves the builder. The compiler and headers never
+  reach the runtime image; `tests/container-sasl-plugin.sh` checks that, and
+  that libsasl2 actually loads XOAUTH2.
+- The builder records what it built in
+  `/usr/share/postfix-m365-relay/sasl-xoauth2.source` (version, commit, tree,
+  repo, plugin directory). The test above and the release jobs assert it; you
+  can read it in any image.
+- The plugin's runtime libraries (libcurl, jsoncpp, ...) are resolved from the
+  compiled `.so` itself, so the runtime stage installs them by their real
+  package names on each release.
 
-Vendoring is the default because it removes the one thing we can't control — a
-single maintainer's PPA staying online — while still not compiling anything (the
-`.deb` is upstream-built). The AlmaLinux path has no equivalent switch: it always
-installs the EPEL 0.27 package. See `vendor/sasl-xoauth2/README.md`.
+To move to a newer upstream release, run
+`vendor/sasl-xoauth2/update.sh release-X.Y`, read the diff, and run
+`tests/run-matrix.sh`. The earlier vendored-`.deb`
+and PPA modes were removed: a checksum on a prebuilt `.deb` proves only that the
+file did not change, not what was compiled into it.
 
 ### Why the plugin *version* barely matters
 
@@ -154,20 +195,35 @@ XOAUTH2 SASL mechanism. Reviewing the upstream `debian/changelog` across
 0.20→0.27, every change is logging/tooling/packaging plus a configurable
 `refresh_window` — **none** alter the token-store format or the presenter, and
 the refresh path we don't use. So any version from ~0.20 up behaves identically
-here; 0.27 (EPEL on Alma, vendored on Ubuntu) is just the newest, and carries a
-0.24 segfault-in-logging fix worth having.
+here. AlmaLinux ships EPEL's 0.27; every other image compiles 0.28 (the
+`release-0.28` commit). The only plugin-code change between them is a fix in
+`src/http.cc` for a curl handle used after cleanup, in the token refresh path
+this relay disables. 0.28's other changes (Microsoft national-cloud endpoints,
+a simpler Google flow) are in `sasl-xoauth2-tool` and the docs, which this
+image does not ship. Upstream's record of each release is the `ChangeLog` file
+at the top of https://github.com/tarickb/sasl-xoauth2.
 
 ## What keeps the shared codebase distro-agnostic
 
-The runtime scripts run unchanged on both bases because the EL-vs-Debian
-differences are feature-detected rather than hardcoded. These are the points that
+The runtime scripts run unchanged on every base because the distro differences
+are feature-detected rather than hardcoded. These are the points that
 would otherwise diverge, and how each is handled:
 
-- **Cyrus SASL config path.** The plugin installs to `/usr/lib64/sasl2` on
-  AlmaLinux and the multiarch `/usr/lib/<triplet>/sasl2` on Ubuntu;
-  `saslpluginviewer -c` shows the client **XOAUTH2** mechanism loaded. The
-  install script writes `smtpd.conf` to `/etc/sasl2/smtpd.conf` on Alma and
-  `/etc/postfix/sasl/smtpd.conf` on Ubuntu — the one place the two paths differ.
+- **Cyrus SASL config path.** The plugin lives in `/usr/lib64/sasl2` on
+  AlmaLinux, the multiarch `/usr/lib/<triplet>/sasl2` on Ubuntu/Debian, and
+  `/usr/lib/sasl2` on Alpine. The install script writes `smtpd.conf` to
+  `/etc/sasl2/smtpd.conf` on Alma and Alpine and to
+  `/etc/postfix/sasl/smtpd.conf` on Ubuntu/Debian. `render-config.sh` finds it
+  and sets `cyrus_sasl_config_path` explicitly: Debian 13's libsasl2 no longer
+  looks in `/etc/postfix/sasl` by itself, so without it inbound AUTH fails with
+  "unable to open Berkeley db /etc/sasldb2".
+- **Alpine userland.** Alpine ships busybox, not bash; the image adds `bash`
+  (the entrypoint and supervisor need it), GNU `grep` (the supervisor's log
+  pipeline uses `--line-buffered`), and `netcat-openbsd` so the healthcheck's
+  `nc` behaves as on the other images. `debian:trixie-slim` likewise lacks
+  `procps` (`kill`, `pgrep`), which the apt install adds. Alpine's Postfix has no
+  Berkeley DB, which does not matter here: the relay uses only `texthash:` and
+  `regexp:` maps.
 - **Package-manager checks.** `verify-relay.sh` feature-detects `rpm` →
   `dpkg-query` (CA-bundle age uses the ca-certificates changelog mtime on
   Debian). The `rpm` path is unchanged on AlmaLinux.
@@ -180,9 +236,9 @@ would otherwise diverge, and how each is handled:
   `/etc/ssl/certs/ca-certificates.crt`); the `container-config-matrix.sh`
   assertion detects it the same way.
 
-Both variants pass **all offline suites** (`tests/run-offline.sh`, 19 suites)
+Every variant passes **all offline suites** (`tests/run-offline.sh`, 19 suites)
 including display-name/sender-rewriting and end-to-end XOAUTH2 delivery.
-`tests/run-matrix.sh` builds and tests both bases from the one Dockerfile as the
+`tests/run-matrix.sh` builds and tests every base from the one Dockerfile as the
 local pre-push gate.
 
 ## amd64 is validated in CI, not locally
@@ -196,7 +252,8 @@ defects**, so `run-matrix.sh` tests only the host-native variants by default
 (`ALL=1` additionally *builds* the emulated amd64 variants for confirmation).
 
 Real amd64 validation runs on a **native amd64 runner**: `.github/workflows/
-test.yml` builds both bases (`ubuntu:24.04`, `almalinux:10`) from the unified
+test.yml` builds every base (`ubuntu:24.04`, `debian:trixie-slim`,
+`alpine:3.22`, `almalinux:10`) from the unified
 Dockerfile on `ubuntu-latest` and runs the full offline suite against each on
 every PR and push. The `alma-v2` microarch build and the arm64 sub-manifests are
 additionally asserted in `.github/workflows/publish-image.yml` on release.
@@ -210,15 +267,15 @@ deep dive (and adding failure-latency logging to that test) is deferred.
 
 ## Current shipped state
 
-The migration to a universal default is complete:
-
 - **`:latest` / `:ubuntu`** — the Ubuntu v1 build (amd64 + arm64). The default;
   runs on every x86-64 CPU including bare-`qemu64` VMs, no hypervisor changes.
+- **`:debian`** — Debian 13, v1 baseline (amd64 + arm64). Opt-in.
+- **`:alpine`** — Alpine 3.22, the smallest image (amd64 + arm64). Opt-in.
 - **`:alma-v3`** — AlmaLinux, AVX2 baseline (amd64 + arm64). Opt-in.
 - **`:alma-v2`** — AlmaLinux altarch, SSE4.2 baseline (amd64 only). Opt-in.
 
 The AlmaLinux images are **kept, not retired**: they serve users who want the
-longer AlmaLinux support horizon (to 2035) or the EPEL packaging. Because both
+longer AlmaLinux support horizon (to 2035) or the EPEL packaging. Because all
 bases now build from one Dockerfile and are gated together in CI, maintaining all
 three tags costs a base-image arg and a build job each — not a second source of
 truth. Retire an `alma-*` tag only if no one depends on that base; the universal

@@ -6,15 +6,16 @@
 set -euo pipefail
 
 repo_files() {
-  # Exclude vendored third-party trees (e.g. bats-core): they are not our source
-  # to lint, and their docs/whitespace would trip the audits below.
-  find "$@" -type f ! -path '*/vendor/bats-core/*' -print
+  # Exclude Git's own metadata (packed-refs starts with a header line that ends
+  # in a space) and vendored third-party trees (bats-core, sasl-xoauth2 source):
+  # they are not our source to lint, and would trip the audits below.
+  find "$@" -type f ! -path '*/.git/*' ! -path '*/vendor/bats-core/*' ! -path '*/vendor/sasl-xoauth2/src/*' -print
 }
 
 # Keep this runner compatible with Bash 3.2, which has arrays but not `mapfile`.
 # Paths in this repository contain no whitespace, so word-splitting the file
 # result is safe across supported development and CI toolchains.
-shell_files=($(repo_files build/postfix-m365-relay scripts tests | awk '/\.sh$|\/relay-users$|\/relay-admin$|\/export-cert$/' | sort -u))
+shell_files=($(repo_files build/postfix-m365-relay scripts tests vendor/sasl-xoauth2 | awk '/\.sh$|\/relay-users$|\/relay-admin$|\/export-cert$/' | sort -u))
 bash -n "${shell_files[@]}"
 python3 -m py_compile scripts/refresh-smtp-token.py scripts/rotate-smtp-relay-cert.py \
   $(repo_files tests | awk '/\.py$/')
@@ -86,5 +87,10 @@ ruby -e '
 ' $(repo_files . | sort)
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git diff --check
+fi
+# The vendored sasl-xoauth2 source must be exactly the recorded upstream commit.
+# Skipped in a source archive, which has no Git to hash with.
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  tests/vendor-sasl-xoauth2.sh
 fi
 echo "ok static syntax, YAML parsing, Python compilation, and whitespace audit"

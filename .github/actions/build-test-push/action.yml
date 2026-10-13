@@ -110,6 +110,7 @@ runs:
       shell: bash
       run: |
         ./tests/python-unit.sh postfix-m365-relay:candidate
+        ./tests/container-sasl-plugin.sh postfix-m365-relay:candidate
         ./tests/container-end-to-end.sh postfix-m365-relay:candidate
         ./tests/container-config-matrix.sh postfix-m365-relay:candidate
         ./tests/container-policy.sh postfix-m365-relay:candidate

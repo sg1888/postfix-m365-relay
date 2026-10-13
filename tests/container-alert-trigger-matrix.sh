@@ -60,7 +60,9 @@ done
 docker logs "$relay" 2>&1 | grep -q 'verify-relay:'
 for role in token verify; do
   role_pid=$(docker exec "$relay" cat "/run/mail-relay/supervisor/$role.pid")
-  docker exec "$relay" kill -STOP -- "-$role_pid"
+  # bash's builtin kill: busybox's /bin/kill (Alpine) rejects the `--` that a
+  # negative process-group id needs.
+  docker exec "$relay" bash -c 'kill -STOP -- "-$1"' _ "$role_pid"
 done
 # Fail fast with a clear message if a frozen process somehow still holds the
 # alert lock; otherwise every later alert call would hang until the job times

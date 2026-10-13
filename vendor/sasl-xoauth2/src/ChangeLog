@@ -1,0 +1,192 @@
+sasl-xoauth2 (0.28) unstable; urgency=low
+
+  * Fix CURL handle use-after-free (thanks @dechamps).
+  * Simplify Google auth flow for headless environments.
+  * Better error handling in scripts.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sun, 11 Oct 2026 20:58:00 -0700
+
+sasl-xoauth2 (0.27) unstable; urgency=low
+
+  * Fix bug preventing tokens from specifying empty client secrets.
+  * Allow specifying empty client secret on CLI when requesting Outlook token.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Wed, 26 Feb 2025 10:19:00 -0800
+
+sasl-xoauth2 (0.26) unstable; urgency=low
+
+  * Add refresh_window parameter to control when tokens are refreshed.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sun, 12 Jan 2025 09:06:00 -0800
+
+sasl-xoauth2 (0.25) unstable; urgency=low
+
+  * Prevent truncation when writing logs.
+  * Allow token-level username overrides.
+  * Script that updates CA certificates creates directories if missing.
+  * Avoid opening/closing syslog (which may have been causing lost logs), and
+    add syslog prefix.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Wed, 30 Oct 2024 08:39:00 -0400
+
+sasl-xoauth2 (0.24) unstable; urgency=low
+
+  * Fix bug in logging code that resulted in missing messages (and the
+    occasional segfault).
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Mon, 17 Jul 2023 17:57:00 -0700
+
+sasl-xoauth2 (0.23) unstable; urgency=low
+
+  * Add new config option, "always_log_to_syslog", to unconditionally
+    log progress to syslog.
+  * Update sasl-xoauth2-tool to enable simplified device flow for
+    Outlook token acquisition.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Thu, 13 Jul 2023 16:17:00 -0700
+
+sasl-xoauth2 (0.22) unstable; urgency=low
+
+  * Update SASL plugin flags to indicate sasl-xoauth2 doesn't send
+    plaintext credentials.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Fri, 23 Jun 2023 08:07:00 -0700
+
+sasl-xoauth2 (0.21) unstable; urgency=low
+
+  * Update sasl-xoauth2-tool so that Outlook client secrets are optional.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Thu, 15 Jun 2023 15:23:00 -0700
+
+sasl-xoauth2 (0.20) unstable; urgency=low
+
+  * Prompt for client secret when using sasl-xoauth2-tool, if it isn't
+    specified as a command-line argument.
+  * Update sasl-xoauth2-tool to pass a client secret when requesting an
+    initial access token for Outlook.
+  * Man pages for sasl-xoauth2-tool, sasl-xoauth2.conf.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sun, 28 May 2023 09:09:00 -0700
+
+sasl-xoauth2 (0.19) unstable; urgency=low
+
+  * sasl-xoauth2-tool is the new one-stop-shop for requesting initial tokens,
+    testing configuration files, and testing token refreshes. It replaces the
+    standalone sasl-xoauth2-token-tool and sasl-xoauth2-test-config tools.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sat, 12 Nov 2022 12:05:00 -0500
+
+sasl-xoauth2 (0.18) unstable; urgency=low
+
+  * Fix bug in sasl-xoauth2-test-config that resulted in a crash if the token
+    file could not be opened.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Tue, 04 Oct 2022 22:08:00 -0700
+
+sasl-xoauth2 (0.17) unstable; urgency=low
+
+  * Reorganize packaging.
+  * Fix sasl-xoauth2-token-tool for compatibility with Python 3.6.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Tue, 04 Oct 2022 12:11:00 -0700
+
+sasl-xoauth2 (0.16) unstable; urgency=low
+
+  * Add ca_bundle_file, ca_certs_dir configuration options to control where
+    SSL/TLS libraries look for CA certificates.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sat, 17 Sep 2022 09:26:00 -0700
+
+sasl-xoauth2 (0.15) unstable; urgency=low
+
+  * Fix packaging of sasl-xoauth2-test-config, and explain its use in the
+    README.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sat, 10 Sep 2022 09:49:00 -0700
+
+sasl-xoauth2 (0.14) unstable; urgency=low
+
+  * Add sasl-xoauth2-token-tool, to allow creation of initial tokens.
+  * Add proxy support.
+  * Add sasl-xoauth2-test-config, to allow interactive testing of configs and
+    token refreshes.
+  * Rename CA certificate update script and ensure it lands in the correct
+    directory during installation.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Mon, 15 Aug 2022 08:27:00 -0700
+
+sasl-xoauth2 (0.13) unstable; urgency=low
+
+  * Rebuild for Ubuntu 22.04 (Jammy).
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sun, 14 Aug 2022 13:23:00 -0700
+
+sasl-xoauth2 (0.12) unstable; urgency=low
+
+  * Prevent Office 365 tokens from expiring after 90 days.
+  * Add script to fetch initial tokens for Gmail.
+  * Install hook to update CA certificates (Ubuntu only).
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sun, 10 Apr 2022 22:34:00 -0700
+
+sasl-xoauth2 (0.11) unstable; urgency=low
+
+  * Allow client ID/secret and endpoint overrides in token files.
+  * Fix HTTP request seek callback signature.
+  * Set SASL SSF so that XOAUTH2 is preferred over other mechanisms.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sat, 05 Feb 2022 09:55:00 -0800
+
+sasl-xoauth2 (0.10) unstable; urgency=low
+
+  * Added Python script to fetch initial tokens for Outlook/Office 365.
+  * Updated README to describe use with Outlook/Office 365.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sun, 29 Nov 2020 22:38:00 -0800
+
+sasl-xoauth2 (0.9) unstable; urgency=low
+
+  * Compile fixes for Focal.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Mon, 10 Aug 2020 13:26:00 -0700
+
+sasl-xoauth2 (0.8) unstable; urgency=low
+
+  * Rework packaging.
+  * Improve CURL request error handling.
+  * Use config file path from package installation path.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sun, 22 Mar 2020 18:58:00 -0700
+
+sasl-xoauth2 (0.7) unstable; urgency=low
+
+  * Flesh out README.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sun, 11 Aug 2019 21:54:00 -0700
+
+sasl-xoauth2 (0.6) unstable; urgency=low
+
+  * Actually (?) fix broken 32-bit build.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sat, 10 Aug 2019 19:22:00 -0700
+
+sasl-xoauth2 (0.5) unstable; urgency=low
+
+  * Fix broken 32-bit build.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sat, 10 Aug 2019 18:58:00 -0700
+
+sasl-xoauth2 (0.4) unstable; urgency=low
+
+  * Add config file in /etc/sasl-xoauth2.conf.
+  * Store client secret in config file.
+  * Write failure logs to syslog instead of /tmp.
+  * Install library directly into SASL plugin directory.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Sat, 10 Aug 2019 10:43:00 -0700
+
+sasl-xoauth2 (0.2) unstable; urgency=low
+
+  * Fix symlinks.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Fri, 09 Aug 2019 17:13:00 -0700

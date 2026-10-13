@@ -27,11 +27,15 @@ fi
 variants=(
   "ubuntu-native|build/postfix-m365-relay/Dockerfile||--build-arg BASE_IMAGE=ubuntu:24.04"
   "alma-native|build/postfix-m365-relay/Dockerfile||--build-arg BASE_IMAGE=almalinux:10"
+  "debian-native|build/postfix-m365-relay/Dockerfile||--build-arg BASE_IMAGE=debian:trixie-slim"
+  "alpine-native|build/postfix-m365-relay/Dockerfile||--build-arg BASE_IMAGE=alpine:3.22"
 )
 if [[ ${ALL:-0} == 1 ]]; then
   variants+=(
     "ubuntu-amd64|build/postfix-m365-relay/Dockerfile|linux/amd64|--build-arg BASE_IMAGE=ubuntu:24.04"
     "alma-amd64|build/postfix-m365-relay/Dockerfile|linux/amd64|--build-arg BASE_IMAGE=almalinux:10"
+    "debian-amd64|build/postfix-m365-relay/Dockerfile|linux/amd64|--build-arg BASE_IMAGE=debian:trixie-slim"
+    "alpine-amd64|build/postfix-m365-relay/Dockerfile|linux/amd64|--build-arg BASE_IMAGE=alpine:3.22"
   )
 fi
 

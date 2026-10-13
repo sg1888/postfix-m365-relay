@@ -54,4 +54,4 @@ fi
 echo
 echo "Pin: \`MAIL_IMAGE=$image@$digest\`"
 echo
-echo "Tags: \`${version#v}\`, \`${version#v}-alma-v3\`, \`${version#v}-alma-v2\` (Docker Hub and GHCR)."
+echo "Tags: \`${version#v}\`, \`${version#v}-debian\`, \`${version#v}-alpine\`, \`${version#v}-alma-v3\`, \`${version#v}-alma-v2\` (Docker Hub and GHCR)."

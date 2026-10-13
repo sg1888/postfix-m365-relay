@@ -8,7 +8,7 @@ name: publish image
 #      SASL, OpenSSL, the CA bundle, Python cryptography, curl, glibc, ...) or a
 #      security fix, it releases the next patch version (v1.1.0 -> v1.1.1) from
 #      the same source commit with current packages. Otherwise nothing happens.
-# Nothing is pushed before it passes: the full test suite (both distros, fresh
+# Nothing is pushed before it passes: the full test suite (every distro, fresh
 # packages, Trivy), then per variant a from-scratch build whose exact layers are
 # scanned, container-tested and package-checked on every platform before the
 # push (.github/actions/build-test-push). An automatic release's git tag is
@@ -95,7 +95,15 @@ jobs:
           fi
 
           : > updates.txt
-          for variant in "$v linux/amd64" "$v-alma-v3 linux/amd64" "$v-alma-v2 linux/amd64/v2"; do
+          variants=("$v linux/amd64" "$v-alma-v3 linux/amd64" "$v-alma-v2 linux/amd64/v2")
+          # Debian and Alpine exist only for releases whose own workflow builds
+          # them; an older release has no such tag to check.
+          for extra in debian alpine; do
+            if git show "$sha:.github/workflows/publish-image.yml" | grep -q "^  build-$extra:"; then
+              variants+=("$v-$extra linux/amd64")
+            fi
+          done
+          for variant in "${variants[@]}"; do
             read -r tag platform <<< "$variant"
             echo "## $tag" >> updates.txt
             if ! .github/scripts/pending-updates.sh "$IMAGE:$tag" "$platform" >> updates.txt; then
@@ -197,7 +205,7 @@ jobs:
           git commit -m "chore: refresh status $(date -u +%Y-%m-%d)" -m "Keeps the scheduled package refresh enabled (GitHub disables schedules after 60 days without activity)."
           git push origin HEAD:main
 
-  # Release gate: the exact same suite as CI (host unit tests + both-variant
+  # Release gate: the exact same suite as CI (host unit tests + every-variant
   # container suites + Trivy), built without layer cache so it tests today's
   # packages.
   suite:
@@ -271,7 +279,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           test-platform: linux/amd64
           package-assert: >-
-            test "$(dpkg-query -W -f='${Version}' sasl-xoauth2 | cut -d- -f1)" = 0.27 &&
+            . /usr/share/postfix-m365-relay/sasl-xoauth2.source &&
+            test -n "$commit" && test -e "$libdir/libsasl-xoauth2.so" &&
+            ! ldd "$libdir/libsasl-xoauth2.so" | grep -q 'not found' &&
             python3 -c 'import cryptography' && command -v saslpasswd2 >/dev/null
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -419,8 +429,134 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+  # Debian 13 build: x86-64 v1 baseline like Ubuntu, newer Postfix (3.10), plus
+  # arm64. Opt-in via the moving `debian` tag and versioned `-debian` tags.
+  build-debian:
+    # Gate on build-ubuntu for the same all-or-nothing reason as build-alma-v3.
+    needs: [plan, build-ubuntu]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          # latest=false: only the Ubuntu job may claim `latest` (see build-ubuntu).
+          flavor: latest=false
+          # The built commit, which on a refresh is the release's, not main's.
+          labels: |
+            org.opencontainers.image.revision=${{ needs.plan.outputs.sha }}
+          images: |
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}-debian,value=${{ needs.plan.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}}-debian,value=${{ needs.plan.outputs.version }}
+            type=semver,pattern={{major}}-debian,value=${{ needs.plan.outputs.version }}
+            type=raw,value=debian,enable=${{ needs.plan.outputs.stable == 'true' }}
+      - id: build
+        uses: ./.github/actions/build-test-push
+        with:
+          base-image: debian:trixie-slim
+          platforms: linux/amd64,linux/arm64
+          test-platform: linux/amd64
+          package-assert: >-
+            . /usr/share/postfix-m365-relay/sasl-xoauth2.source &&
+            test -n "$commit" && test -e "$libdir/libsasl-xoauth2.so" &&
+            ! ldd "$libdir/libsasl-xoauth2.so" | grep -q 'not found' &&
+            python3 -c 'import cryptography' && command -v saslpasswd2 >/dev/null
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      - name: Attest GHCR provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  # Alpine build: the smallest image (musl libc), Postfix 3.10, amd64 + arm64.
+  # Opt-in via the moving `alpine` tag and versioned `-alpine` tags.
+  build-alpine:
+    # Gate on build-ubuntu for the same all-or-nothing reason as build-alma-v3.
+    needs: [plan, build-ubuntu]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          # latest=false: only the Ubuntu job may claim `latest` (see build-ubuntu).
+          flavor: latest=false
+          # The built commit, which on a refresh is the release's, not main's.
+          labels: |
+            org.opencontainers.image.revision=${{ needs.plan.outputs.sha }}
+          images: |
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}-alpine,value=${{ needs.plan.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}}-alpine,value=${{ needs.plan.outputs.version }}
+            type=semver,pattern={{major}}-alpine,value=${{ needs.plan.outputs.version }}
+            type=raw,value=alpine,enable=${{ needs.plan.outputs.stable == 'true' }}
+      - id: build
+        uses: ./.github/actions/build-test-push
+        with:
+          base-image: alpine:3.22
+          platforms: linux/amd64,linux/arm64
+          test-platform: linux/amd64
+          package-assert: >-
+            . /usr/share/postfix-m365-relay/sasl-xoauth2.source &&
+            test -n "$commit" && test -e "$libdir/libsasl-xoauth2.so" &&
+            ! ldd "$libdir/libsasl-xoauth2.so" | grep -q 'not found' &&
+            python3 -c 'import cryptography' && command -v saslpasswd2 >/dev/null
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      - name: Attest GHCR provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
   dockerhub-description:
-    needs: [plan, build-ubuntu, build-alma-v3, build-alma-v2]
+    needs: [plan, build-ubuntu, build-alma-v3, build-alma-v2, build-debian, build-alpine]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -446,7 +582,7 @@ jobs:
   # instead of leaving latest quietly wrong. Only meaningful on a real version tag
   # (the one that actually pushes the moving latest/ubuntu tags).
   verify-latest:
-    needs: [plan, build-ubuntu, build-alma-v3, build-alma-v2]
+    needs: [plan, build-ubuntu, build-alma-v3, build-alma-v2, build-debian, build-alpine]
     if: ${{ needs.plan.outputs.stable == 'true' }}
     runs-on: ubuntu-latest
     steps:
@@ -467,7 +603,7 @@ jobs:
   # only for a version whose every variant passed and was published. Created
   # with GITHUB_TOKEN, which by design does not trigger this workflow again.
   tag-release:
-    needs: [plan, build-ubuntu, build-alma-v3, build-alma-v2, verify-latest]
+    needs: [plan, build-ubuntu, build-alma-v3, build-alma-v2, build-debian, build-alpine, verify-latest]
     if: needs.plan.outputs.create_tag == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -519,11 +655,12 @@ jobs:
   # github-actions). Creating a release triggers no workflow, so a personal
   # token is safe here.
   release-notes:
-    needs: [plan, build-ubuntu, build-alma-v3, build-alma-v2, verify-latest, tag-release]
+    needs: [plan, build-ubuntu, build-alma-v3, build-alma-v2, build-debian, build-alpine, verify-latest, tag-release]
     if: >-
       always() && needs.plan.outputs.publish == 'true' &&
       needs.build-ubuntu.result == 'success' && needs.build-alma-v3.result == 'success' &&
       needs.build-alma-v2.result == 'success' &&
+      needs.build-debian.result == 'success' && needs.build-alpine.result == 'success' &&
       (needs.verify-latest.result == 'success' || needs.verify-latest.result == 'skipped') &&
       (needs.tag-release.result == 'success' || needs.tag-release.result == 'skipped')
     runs-on: ubuntu-latest
@@ -573,7 +710,7 @@ jobs:
               echo
               echo "Pin: \`MAIL_IMAGE=$IMAGE@$DIGEST\`"
               echo
-              echo "Tags: \`${VERSION#v}\`, \`${VERSION#v}-alma-v3\`, \`${VERSION#v}-alma-v2\` (Docker Hub and GHCR)."
+              echo "Tags: \`${VERSION#v}\`, \`${VERSION#v}-debian\`, \`${VERSION#v}-alpine\`, \`${VERSION#v}-alma-v3\`, \`${VERSION#v}-alma-v2\` (Docker Hub and GHCR)."
             } > notes.md
           else
             # Released by hand: the maintainer's notes from the tag (may be

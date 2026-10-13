@@ -678,11 +678,15 @@ cheap hardening you should keep. That's the whole storage story.
 Docker Hub is primary; GHCR is a mirror. Release CI publishes:
 
 - `latest` / `ubuntu` — Ubuntu base, `linux/amd64` + `linux/arm64`, runs on any CPU;
+- `debian` — Debian 13 base with Postfix 3.10, `linux/amd64` + `linux/arm64`, runs on any CPU;
+- `alpine` — Alpine base, the smallest image, `linux/amd64` + `linux/arm64`, runs on any CPU;
 - `alma-v3` — AlmaLinux (x86-64-v3 / AVX2), `linux/amd64` + `linux/arm64`;
 - `alma-v2` — AlmaLinux (x86-64-v2 / SSE4.2), `linux/amd64` only, for older x86.
 
-Use a 64-bit OS on Raspberry Pi. 32-bit platforms are outside the v1 support
-contract. Pin a release digest after you evaluate it — tags are mutable.
+Versioned tags carry the same suffix (`X.Y.Z-debian`). Use a 64-bit OS on
+Raspberry Pi; 32-bit platforms are not built (Docker itself no longer ships
+packages for 32-bit Raspberry Pi OS). Pin a release digest after you evaluate
+it — tags are mutable.
 
 ## Documentation
 

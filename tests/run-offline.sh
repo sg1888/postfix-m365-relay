@@ -23,6 +23,7 @@ jobs=${TEST_JOBS:-$default_jobs}
 
 tests=(
   python-unit.sh
+  container-sasl-plugin.sh
   container-sender-names.sh
   container-optional-sender.sh
   container-end-to-end.sh

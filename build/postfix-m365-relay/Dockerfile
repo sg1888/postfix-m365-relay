@@ -6,19 +6,27 @@
 # behavior this relay needs. SMTP AUTH with an OAuth token preserves configured
 # application display names; regression tests cover that behavior.
 #
-# ONE Dockerfile, two base distros, chosen by BASE_IMAGE:
+# ONE Dockerfile, four base distros, chosen by BASE_IMAGE:
+#   - ubuntu:24.04          published as `latest`. x86-64 v1 baseline, so one
+#                           amd64 image runs on every x86-64 CPU (including
+#                           default-CPU VMs).
+#   - debian:trixie-slim    same CPU baseline as Ubuntu; newer Postfix (3.10).
+#   - alpine:3.22           smallest image (musl); Postfix 3.10.
 #   - almalinux:10          x86-64-v3 baseline (needs AVX2); EPEL ships
 #                           sasl-xoauth2 0.27, and AlmaLinux 10 is supported to
 #                           2035. An x86-64-v2 rebuild is published from
 #                           almalinux/10-base (SSE4.2), guarded by
 #                           EXPECT_ALMALINUX_ARCH.
-#   - ubuntu:24.04          x86-64 v1 baseline, so one amd64 image runs on every
-#                           x86-64 CPU (including default-CPU VMs). sasl-xoauth2
-#                           is not in Debian stable; obtained via the checksum-
-#                           pinned vendored .deb by default (see SXO_SOURCE).
-# The per-distro package install, sasl-xoauth2 sourcing, and sasl config seeding
-# live in build-scripts/postfix-install.sh, dispatched by the package manager
-# present. Runtime scripts are already distro-aware.
+# Every image is amd64 + arm64 (alma-v2: amd64 only). 32-bit platforms are not
+# built: Docker Engine 29+ ships no packages for 32-bit Raspberry Pi OS, and
+# none at all for ARMv6 boards.
+# sasl-xoauth2: AlmaLinux installs EPEL's signed package. Every other base
+# compiles it in the builder stage below from the upstream source vendored in
+# vendor/sasl-xoauth2 (no distro but EL packages it, and a prebuilt binary is
+# not auditable).
+# The per-distro package install and sasl config seeding live in
+# build-scripts/postfix-install.sh, dispatched by the package manager present.
+# Runtime scripts are already distro-aware.
 #
 # Image update policy:
 #   - the base tag is pinned; --pull refreshes patches inside it
@@ -30,28 +38,31 @@
 # A rebuild without --pull reuses the cached base layer and ships last month's
 # libraries while looking like it did something.
 ARG BASE_IMAGE=almalinux:10
+
+# Builder: compile sasl-xoauth2 on the same base (same libc, libsasl2 and
+# plugin directory as the runtime) from the vendored, hash-verified source in
+# vendor/sasl-xoauth2 (see its README). No source is fetched over the network.
+# Its toolchain never reaches the image; only /out is read by the runtime
+# stage. Empty on AlmaLinux.
+FROM ${BASE_IMAGE} AS sasl-xoauth2
+RUN --mount=type=bind,source=build/postfix-m365-relay/build-scripts,target=/build-scripts \
+    --mount=type=bind,source=vendor/sasl-xoauth2,target=/sasl-xoauth2-vendor \
+    sh /build-scripts/sasl-xoauth2-build.sh
+
 FROM ${BASE_IMAGE}
 
-# almalinux (v2 build) arch guard; empty for the normal v3 and Ubuntu builds.
+# almalinux (v2 build) arch guard; empty for every other build.
 ARG EXPECT_ALMALINUX_ARCH=
-# Ubuntu sasl-xoauth2 sourcing: vendored (default) | ppa | source. Ignored on Alma.
-ARG SXO_SOURCE=vendored
-# Upstream release tag used by SXO_SOURCE=source. Matches the vendored version.
-ARG SXO_SOURCE_REF=release-0.27
-# buildx populates TARGETARCH automatically (amd64 | arm64).
-ARG TARGETARCH
 
-# Install packages, source the sasl-xoauth2 plugin, and seed sasl/postfix config.
-# The script and the vendored .deb set are bind-mounted (not COPYed) so they
-# never land in an image layer.
+# Install packages, install the sasl-xoauth2 plugin, and seed sasl/postfix
+# config. The script and the builder output are bind-mounted (not COPYed) so
+# neither lands in an image layer of its own.
 RUN --mount=type=bind,source=build/postfix-m365-relay/build-scripts,target=/build-scripts \
-    --mount=type=bind,source=vendor/sasl-xoauth2,target=/vendor-sasl-xoauth2 \
+    --mount=type=bind,from=sasl-xoauth2,source=/out,target=/sasl-xoauth2-out \
     EXPECT_ALMALINUX_ARCH="$EXPECT_ALMALINUX_ARCH" \
-    SXO_SOURCE="$SXO_SOURCE" SXO_SOURCE_REF="$SXO_SOURCE_REF" \
-    TARGETARCH="$TARGETARCH" \
     sh /build-scripts/postfix-install.sh
 
-# One COPY list for both distros: any new runtime file is added here once and
+# One COPY list for every distro: any new runtime file is added here once and
 # ships in every variant. (A duplicated per-distro COPY list is exactly how a
 # runtime script once went missing from one image only.)
 COPY build/postfix-m365-relay/entrypoint.sh build/postfix-m365-relay/relay-supervisor.sh \

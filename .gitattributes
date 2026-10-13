@@ -1,0 +1,4 @@
+# Vendored third-party source is kept byte-identical to upstream (verified by
+# vendor/sasl-xoauth2/update.sh --check), so Git's whitespace checks do not
+# apply to it.
+vendor/sasl-xoauth2/src/** -whitespace

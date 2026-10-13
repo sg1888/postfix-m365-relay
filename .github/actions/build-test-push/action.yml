@@ -67,7 +67,7 @@ runs:
     #    current CA bundle). Exported to a job-local layer cache that the later
     #    builds read, so they reproduce these layers instead of rebuilding.
     - name: Build candidate (all platforms, no cache)
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       with:
         context: .
         file: build/postfix-m365-relay/Dockerfile
@@ -80,7 +80,7 @@ runs:
 
     # 2. Load the native-platform candidate (from the cache: the same layers).
     - name: Load candidate for tests
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       with:
         context: .
         file: build/postfix-m365-relay/Dockerfile
@@ -139,7 +139,7 @@ runs:
     # 4. Only now push, assembled from the same cached layers.
     - id: push
       name: Push tested image
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       with:
         context: .
         file: build/postfix-m365-relay/Dockerfile

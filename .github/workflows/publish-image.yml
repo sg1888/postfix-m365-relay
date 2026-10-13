@@ -57,6 +57,14 @@ jobs:
           FORCE: ${{ inputs.force || false }}
         run: |
           if [ "${GITHUB_EVENT_NAME}" = push ]; then
+            # The tag an automatic refresh creates (job tag-release) also
+            # arrives here as a tag push; its images are already published.
+            if git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents)' | grep -q '^Automatic package refresh of '; then
+              { echo "publish=false"; echo "version=${GITHUB_REF_NAME}"; echo "sha=${GITHUB_SHA}"
+                echo "stable=true"; echo "create_tag=false"; echo "base_version="; } >> "$GITHUB_OUTPUT"
+              echo "${GITHUB_REF_NAME} was created by an automatic refresh, which already published it." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
             version="${GITHUB_REF_NAME}"
             case "$version" in *-*) stable=false ;; *) stable=true ;; esac
             {
@@ -91,9 +99,18 @@ jobs:
             read -r tag platform <<< "$variant"
             echo "## $tag" >> updates.txt
             if ! .github/scripts/pending-updates.sh "$IMAGE:$tag" "$platform" >> updates.txt; then
-              echo "image $IMAGE:$tag could not be checked [key]" >> updates.txt
+              echo "image $IMAGE:$tag could not be checked [unchecked]" >> updates.txt
             fi
           done
+
+          # A check that could not run is not a reason to release: on
+          # 2026-10-13 it released 1.2.1 with nothing pending. Fail instead, so
+          # GitHub emails the maintainer; tomorrow's run tries again.
+          if grep -q '\[unchecked\]' updates.txt; then
+            { echo '```'; cat updates.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::a published image could not be checked for updates; nothing released"
+            exit 1
+          fi
 
           if grep -Eq '\[(key|security)\]' updates.txt || [ "$FORCE" = true ]; then
             IFS=. read -r major minor patch <<< "$v"
@@ -456,9 +473,20 @@ jobs:
     permissions:
       contents: write
     steps:
+      # GITHUB_TOKEN may not create this tag: the release commit's workflow
+      # files differ from main's, and GitHub refuses any ref "changing a
+      # workflow" without the workflows permission, which GITHUB_TOKEN never
+      # has (2026-10-13). RELEASE_TOKEN needs Contents and Workflows: read and
+      # write. Its tag push starts this workflow again; job plan recognises a
+      # refresh tag and publishes nothing.
+      - name: RELEASE_TOKEN is required
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: '[ -n "$RELEASE_TOKEN" ] || { echo "::error::set the RELEASE_TOKEN secret (Contents and Workflows: read and write)"; exit 1; }'
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
       - uses: actions/download-artifact@v8
         with:
           name: pending-updates

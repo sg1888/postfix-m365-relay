@@ -69,7 +69,10 @@ case "$distro" in
   *) echo "pending-updates: unknown distro in $image" >&2; exit 2 ;;
 esac
 
-printf '%s\n' "$out" | grep -v '^distro=' | while read -r name old new sec; do
+# No pending update is the normal case: grep then matches nothing and exits 1,
+# which under pipefail would fail the whole check (2026-10-13: that released
+# 1.2.1 for nothing). Only a failure to run the image is an error.
+printf '%s\n' "$out" | { grep -v '^distro=' || true; } | while read -r name old new sec; do
   [ -n "$name" ] || continue
   tags=
   [[ $key == *" $name "* ]] && tags+=' [key]'

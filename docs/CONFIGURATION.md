@@ -397,7 +397,7 @@ distro packages, CA bundle included, were refreshed more than
 `/usr/share/postfix-m365-relay/packages-refreshed`, stamped by the build in the
 same layer as the package upgrade, not from the `ca-certificates` package date
 (distros can rightly ship one bundle for months). Published images are
-refreshed whenever a key or security update is pending (docs/RELEASING.md), so
+refreshed whenever a key or security update is pending, so
 the incident means your container hasn't moved to a newer image. Repeated
 checks update it without duplicates. A tested image replacement clears it with
 the same reference and elapsed duration. This doesn't mutate running images.

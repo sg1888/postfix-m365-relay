@@ -699,8 +699,6 @@ contract. Pin a release digest after you evaluate it — tags are mutable.
 | Token refresh, cert rotation, queues, alerts, recovery | [Operator runbook](docs/RUNBOOK.md) |
 | Security boundary and supported CPU platforms | [Scope and platforms](docs/SCOPE.md) |
 | Offline, live-install, failure, and release qualification | [Testing](docs/TESTING.md) |
-| Publishing images and release tags | [Maintainer release procedure](docs/RELEASING.md) |
-| GitHub repository and Actions | [GitHub guide](docs/GITHUB.md) |
 
 ## License
 

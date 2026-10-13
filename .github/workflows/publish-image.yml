@@ -1,7 +1,7 @@
 name: publish image
 
 # Two ways a release is published, both through the same gates:
-#   1. You push a v* tag (scripts/release.sh). That tag is built and published.
+#   1. A maintainer pushes a v* tag. That tag is built and published.
 #   2. Automatic refresh. Daily, the "plan" job asks each published variant of
 #      the newest release which distro updates it is missing
 #      (.github/scripts/pending-updates.sh). If any is a key package (Postfix,
@@ -83,13 +83,13 @@ jobs:
           # A refresh rebuilds the release's own source. Releases older than the
           # package upgrade in the build cannot pick up updates, so refreshing
           # one would re-release the same packages every day. Skip until a
-          # manual release (scripts/release.sh) contains it.
+          # manual release contains it.
           if ! git show "$sha:build/postfix-m365-relay/build-scripts/postfix-install.sh" | grep -q packages-refreshed; then
             {
               echo "publish=false"; echo "version=$last"; echo "sha=$sha"
               echo "stable=true"; echo "create_tag=false"; echo "base_version=$last"
             } >> "$GITHUB_OUTPUT"
-            echo "::notice::$last predates automatic package refreshes; cut a release with scripts/release.sh first."
+            echo "::notice::$last predates automatic package refreshes; cut a release by hand first."
             echo "$last predates automatic package refreshes; nothing to do until a newer release exists." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -178,7 +178,7 @@ jobs:
             echo
             echo "Written by the daily run of \`.github/workflows/publish-image.yml\` when"
             echo "\`main\` has had no commit for 45 days, so that GitHub keeps the schedule"
-            echo "enabled. See docs/RELEASING.md, \"Automatic package refreshes\"."
+            echo "enabled (see the keepalive job in .github/workflows/publish-image.yml)."
             echo
             echo "- Checked: $(date -u '+%Y-%m-%d %H:%M UTC')"
             echo "- Newest release: ${RELEASE:-unknown}"
@@ -530,9 +530,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Full history and tags: the notes list the commits since the previous
+      # release and read the operator's notes from the tag message.
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
       - uses: actions/download-artifact@v8
         if: needs.plan.outputs.create_tag == 'true'
         with:
@@ -550,8 +553,8 @@ jobs:
             echo "release $VERSION already exists; leaving it as it is"
             exit 0
           fi
-          {
-            if [ "$REFRESH" = true ]; then
+          if [ "$REFRESH" = true ]; then
+            {
               echo "Automatic package refresh of $BASE. Same source code; the image was"
               echo "rebuilt with current distro packages because these updates were pending"
               echo "([key] = a package the relay depends on directly, [security] = a distro"
@@ -567,13 +570,16 @@ jobs:
               cat updates.txt
               echo '```'
               echo "</details>"
-            fi
-            echo
-            echo "Pin: \`MAIL_IMAGE=$IMAGE@$DIGEST\`"
-            echo
-            echo "Tags: \`${VERSION#v}\`, \`${VERSION#v}-alma-v3\`, \`${VERSION#v}-alma-v2\` (Docker Hub and GHCR)."
-          } > notes.md
+              echo
+              echo "Pin: \`MAIL_IMAGE=$IMAGE@$DIGEST\`"
+              echo
+              echo "Tags: \`${VERSION#v}\`, \`${VERSION#v}-alma-v3\`, \`${VERSION#v}-alma-v2\` (Docker Hub and GHCR)."
+            } > notes.md
+          else
+            # Released by hand: the maintainer's notes from the tag (may be
+            # empty), the commits since the previous release, and the digest.
+            .github/scripts/release-notes.sh "$VERSION" "$IMAGE" "$DIGEST" > notes.md
+          fi
           args=(--title "$VERSION" --notes-file notes.md --verify-tag)
-          [ "$REFRESH" = true ] || args+=(--generate-notes)
           [ "$STABLE" = true ] || args+=(--prerelease)
           gh release create "$VERSION" "${args[@]}"

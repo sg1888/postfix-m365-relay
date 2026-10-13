@@ -97,6 +97,7 @@ expect_boot_failure 'MAIL_SUBNET must be an IPv4 CIDR' -e MAIL_SUBNET=192.0.2.0
 # configuration: entrypoint waits without a listener until one appears. The
 # dedicated first-run suite proves that bounded setup behavior. Rows below keep
 # a sender and therefore exercise strict post-setup validation failures.
+expect_boot_failure 'MAIL_LOG_HEALTHCHECKS must be yes or no' -e MAIL_LOG_HEALTHCHECKS=maybe
 expect_boot_failure 'must not contain a newline' -e $'MAIL_SENDER_NAME_APP=bad\nheader'
 expect_boot_failure 'expected user:password' -e MAIL_INBOUND_AUTH=smtp-auth \
   -e MAIL_SMTPD_USERS_FILE=/run/secrets/bad -v "$fixture/users-no-colon":/run/secrets/bad:ro

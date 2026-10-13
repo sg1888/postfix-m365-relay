@@ -92,6 +92,21 @@ run_verify_loop() {
     sleep "${MAIL_VERIFY_LOOP_SECONDS:-3600}" & wait $!
   done
 }
+run_log_stream() {
+  # Postfix's log, copied to the container log (docker logs, Dozzle). The
+  # container healthcheck opens an SMTP session every interval and only sends
+  # QUIT, which Postfix logs as "connect from localhost[127.0.0.1]" and
+  # "disconnect from localhost[127.0.0.1] quit=1 commands=1": two lines a minute
+  # that say nothing. They are left out of the container log unless
+  # MAIL_LOG_HEALTHCHECKS=yes; /var/log/mail-relay/postfix.log keeps every line.
+  # The verifier's own local sessions also start with that connect line; their
+  # disconnect line (more commands) and their mail lines are kept.
+  if [[ ${MAIL_LOG_HEALTHCHECKS:-no} == yes ]]; then
+    exec tail -n 0 -F /var/log/mail-relay/postfix.log
+  fi
+  tail -n 0 -F /var/log/mail-relay/postfix.log | grep --line-buffered -v -E \
+    'smtpd\[[0-9]+\]: (connect from localhost\[127\.0\.0\.1\]|disconnect from localhost\[127\.0\.0\.1\] quit=1 commands=1)$'
+}
 run_role() {
   # Restartable roles run in their own session/process group.  The first live
   # supervisor used ordinary background functions.  Killing the function shell
@@ -103,7 +118,7 @@ run_role() {
     token) run_token_loop ;;
     rotation) run_rotation_loop ;;
     verify) run_verify_loop ;;
-    log) tail -n 0 -F /var/log/mail-relay/postfix.log ;;
+    log) run_log_stream ;;
     *) log "unknown restartable role: $1"; return 64 ;;
   esac
 }

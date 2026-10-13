@@ -151,6 +151,12 @@ MAIL_RELAY_HOSTNAME=postfix-m365-relay.relay.example.local
 # turn it back off when done. All other health checks run regardless.
 MAIL_VERIFY_SEND=no
 
+# "no" (default): the container log (docker logs) leaves out the two lines
+# Postfix writes for each healthcheck, "connect from localhost[127.0.0.1]" and
+# "disconnect from localhost[127.0.0.1] quit=1 commands=1", one pair a minute.
+# "yes" shows them. /var/log/mail-relay/postfix.log always keeps every line.
+MAIL_LOG_HEALTHCHECKS=no
+
 
 # -----------------------------------------------------------------------------
 # 7. Advanced

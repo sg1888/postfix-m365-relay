@@ -145,6 +145,7 @@ if [[ -n ${TZ:-} ]]; then
 fi
 [[ ${MAIL_CA_BUNDLE_MAX_AGE_DAYS:-90} =~ ^[0-9]+$ ]] || \
   fail 'MAIL_CA_BUNDLE_MAX_AGE_DAYS must be a whole number of days'
+case ${MAIL_LOG_HEALTHCHECKS:-no} in yes|no) ;; *) fail 'MAIL_LOG_HEALTHCHECKS must be yes or no' ;; esac
 
 # Secrets must enter through files. Environment values are visible in `docker
 # inspect`, support bundles, and many process listings. The named checks catch

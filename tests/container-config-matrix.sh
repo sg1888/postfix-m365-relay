@@ -159,6 +159,14 @@ if docker logs "$container" 2>&1 | grep -Fq 'improper command pipelining'; then
   exit 1
 fi
 echo 'ok banner healthcheck waits for the greeting'
+# Those healthcheck sessions are left out of the container log by default
+# (MAIL_LOG_HEALTHCHECKS=no) but stay in Postfix's own log file.
+if docker logs "$container" 2>&1 | grep -Fq 'disconnect from localhost[127.0.0.1] quit=1 commands=1'; then
+  echo 'healthcheck sessions reached the container log' >&2
+  exit 1
+fi
+docker exec "$container" grep -Fq 'disconnect from localhost[127.0.0.1] quit=1 commands=1' /var/log/mail-relay/postfix.log
+echo 'ok healthcheck sessions kept out of the container log, kept in postfix.log'
 
 # Credentials are rebuilt from the mounted source on restart. Remove one line
 # in place (so the bind mount sees the update), recreate the same mode, and

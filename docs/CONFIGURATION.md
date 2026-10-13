@@ -249,6 +249,7 @@ policy for TLS-1.0 hardware—use IP policy instead.
 | `MAIL_ROTATION_LOOP_SECONDS` | `86400` |
 | `MAIL_VERIFY_LOOP_SECONDS` | `3600` |
 | `MAIL_VERIFY_SEND` | `no` -- test-only end-to-end probe; see below |
+| `MAIL_LOG_HEALTHCHECKS` | `no` -- leave the healthcheck's connect/disconnect lines out of the container log |
 | `MAIL_CA_BUNDLE_MAX_AGE_DAYS` | `90` |
 | `MAIL_TOKEN_ALERT_AFTER` | `3` consecutive failures |
 | `MAIL_QUEUE_WARN_DEPTH` | `25` deferred messages |
@@ -333,6 +334,22 @@ the container, use either:
 Both regenerate the live certificate, keep the previous pair as `.previous`, and
 raise the repeated upload banner. The old app-registration key is left in place
 (shown `SUPERSEDED` by `relay-admin keys`) for you to remove when ready.
+
+### `MAIL_LOG_HEALTHCHECKS` — healthcheck lines in the container log
+
+The Compose healthcheck opens an SMTP session every interval and only sends
+`QUIT`. Postfix logs each one as two lines:
+
+```
+postfix/smtpd[...]: connect from localhost[127.0.0.1]
+postfix/smtpd[...]: disconnect from localhost[127.0.0.1] quit=1 commands=1
+```
+
+With the default `no`, the container log (`docker logs`, Dozzle) leaves those
+two lines out; set `yes` to see them. `/var/log/mail-relay/postfix.log` inside
+the container always keeps every line. The relay's own hourly check also
+connects from 127.0.0.1; its connect line is left out too, while its other
+lines are kept.
 
 ### `MAIL_VERIFY_SEND` — end-to-end delivery probe (test only, off by default)
 

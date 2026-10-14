@@ -111,6 +111,7 @@ jobs:
             echo "### Review before merging"
             echo
             echo "- Read the plugin code change: \`git diff main -- vendor/sasl-xoauth2/src/src\`"
+            echo "- Check it against the findings in \`vendor/sasl-xoauth2/REVIEW.md\` (logging, HttpPost, TokenStore::Refresh, config keys) and update that review on this branch"
             echo "- After merging, cut a release so the Ubuntu, Debian and Alpine images ship it."
           } > body.md
           title="sasl-xoauth2: vendor upstream $TAG"

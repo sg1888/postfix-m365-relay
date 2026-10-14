@@ -148,6 +148,7 @@ EOF
 
 Next steps:
   - read the upstream changes: git diff -- vendor/sasl-xoauth2/src
+  - check them against vendor/sasl-xoauth2/REVIEW.md and update it
   - run tests/run-matrix.sh (tests/container-sasl-plugin.sh checks each image
     was compiled from this commit)
 EOF

@@ -34,13 +34,14 @@ chmod 0600 "$fixture/upstream.key"
 : > "$fixture/messages.jsonl"
 
 # A static, non-secret token keeps this test focused on Postfix's queue.  The
-# fake server accepts any syntactically valid XOAUTH2 bearer value and never
-# records it.  Its expiry is kept one hour ahead so the refresh helper does not
+# fake server accepts only this token (by its SHA-256) and never records it.
+# Its expiry is kept one hour ahead so the refresh helper does not
 # try to contact Entra while the replacement drill is in progress.
 expiry=$(( $(date +%s) + 3600 ))
 printf '{"access_token":"offline-spool-test-token","expiry":"%s","refresh_token":"unused-app-only-flow"}\n' \
   "$expiry" > "$fixture/relay.json"
 chmod 0644 "$fixture/relay.json"
+token_sha256=$(printf %s offline-spool-test-token | openssl dgst -sha256 -r | cut -d' ' -f1)
 
 docker network create --internal "$network" >/dev/null
 docker volume create "$state" >/dev/null
@@ -150,7 +151,8 @@ after=$(queue_id)
 docker run -d --name "$upstream" --network "$network" --network-alias upstream \
   --entrypoint python3 -v "$PWD/tests":/tests:ro -v "$fixture":/data \
   "$image" /tests/fake_xoauth2_smtp.py --cert /data/upstream.crt \
-  --key /data/upstream.key --output /data/messages.jsonl >/dev/null
+  --key /data/upstream.key --output /data/messages.jsonl \
+  --expect-token-sha256 "$token_sha256" >/dev/null
 for _attempt in {1..20}; do
   docker logs "$upstream" > "$fixture/upstream-ready.log" 2>&1
   grep -q '^READY ' "$fixture/upstream-ready.log" && break

@@ -38,6 +38,10 @@ jobs:
       # has that tree.
       - name: Vendored sasl-xoauth2 matches upstream
         run: vendor/sasl-xoauth2/update.sh --verify
+      # Upstream's unit tests under ASan/LSan/UBSan: memory errors, leaks and
+      # undefined behaviour the tests reach fail the run. The image is untouched.
+      - name: Vendored sasl-xoauth2 under sanitizers
+        run: ./tests/sasl-xoauth2-sanitizers.sh
 
   container:
     runs-on: ubuntu-latest
@@ -123,6 +127,10 @@ jobs:
         run: ./tests/container-optional-sender.sh postfix-m365-relay:test
       - name: Real Postfix-to-XOAUTH2 sink integration
         run: ./tests/container-end-to-end.sh postfix-m365-relay:test
+      - name: Rejected XOAUTH2 defers, then delivers
+        run: ./tests/container-auth-rejected.sh postfix-m365-relay:test
+      - name: Token-file faults on a read-only root
+        run: ./tests/container-token-faults.sh postfix-m365-relay:test
       # This separate drill removes and recreates the relay around an actually
       # deferred message. It guards the named spool volume contract that a
       # normal happy-path protocol test cannot prove.

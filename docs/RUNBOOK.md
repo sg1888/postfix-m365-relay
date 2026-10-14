@@ -162,6 +162,19 @@ docker exec postfix-m365-relay python3 -c \
 docker logs --since 30m postfix-m365-relay
 ```
 
+Postfix logs an authentication failure as `SASL authentication failed`. The
+XOAUTH2 plugin's own reason follows it in the same log as a `[sasl-xoauth2]
+auth failed:` line:
+
+| Plugin reason | Meaning |
+|---|---|
+| `TokenStore::Read: failed to open file` | token file missing or unreadable |
+| `TokenStore::Read: exception` | token file empty or not valid JSON |
+| `TokenStore::Refresh: http error` | token expired; the plugin's own refresh is disabled by design, so the relay's token loop must write a new one |
+| none, and Postfix shows `535` from the server | Microsoft rejected the token: check the SMTP.SendAsApp role and the mailbox |
+
+Mail stays deferred in all of these cases and delivers once the token is good.
+
 Missing/expired token with AADSTS errors usually means the public cert is absent,
 expired, or not propagated. Graph tokens (not `outlook.office365.com/.default`)
 are refused at SMTP AUTH. Don't delete queued mail while diagnosing.

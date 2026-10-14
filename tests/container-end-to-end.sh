@@ -31,12 +31,17 @@ expiry=$(( $(date +%s) + 3600 ))
 printf '{"access_token":"offline-test-token","expiry":"%s","refresh_token":"unused-app-only-flow"}\n' \
   "$expiry" > "$fixture/relay.json"
 chmod 0644 "$fixture/relay.json"
+# The sink accepts only this exact token: delivery proves the plugin sent the
+# token from the mounted file, not merely something shaped like a bearer token.
+token_sha256=$(printf %s offline-test-token | openssl dgst -sha256 -r | cut -d' ' -f1)
+: > "$fixture/auth.jsonl"
 
 docker network create --internal "$network" >/dev/null
 docker run -d --name "$upstream" --network "$network" --network-alias upstream \
   --entrypoint python3 -v "$PWD/tests":/tests:ro -v "$fixture":/data \
   "$image" /tests/fake_xoauth2_smtp.py --cert /data/upstream.crt \
-  --key /data/upstream.key --output /data/messages.jsonl >/dev/null
+  --key /data/upstream.key --output /data/messages.jsonl \
+  --expect-token-sha256 "$token_sha256" --auth-log /data/auth.jsonl >/dev/null
 docker run -d --name "$webhook" --network "$network" --network-alias webhook \
   --entrypoint python3 -v "$PWD/tests":/tests:ro -v "$fixture":/data \
   "$image" /tests/fake_webhook.py --output /data/webhooks.jsonl >/dev/null
@@ -154,7 +159,14 @@ for record in records:
     assert message["From"].addresses[0].addr_spec == "relay-test@example.invalid"
     assert message["From"].addresses[0].display_name == expected[str(message["Subject"])]
 PY
+E2E_AUTH=$fixture/auth.jsonl python3 - <<'PY'
+import json, os
+attempts = [json.loads(line) for line in open(os.environ["E2E_AUTH"])]
+assert attempts, "no XOAUTH2 authentication reached the sink"
+assert all(a == {"result": "accepted", "user": "relay-test@example.invalid"} for a in attempts), attempts
+PY
 echo 'ok real Postfix TLS/XOAUTH2 delivery preserves exact bracket and dollar display names'
+echo 'ok XOAUTH2 sent exactly the mounted token for the configured mailbox'
 # Save before searching. `docker logs | grep -q` can make the Docker client exit
 # with SIGPIPE after grep finds an early match; under pipefail that reported 141
 # even though both messages had already reached the verified test endpoint.

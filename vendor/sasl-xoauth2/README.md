@@ -42,6 +42,14 @@ the CI suite also runs `--verify`. Each image records the version and commit it
 was compiled from in `/usr/share/postfix-m365-relay/sasl-xoauth2.source`, and
 `tests/container-sasl-plugin.sh` checks that it matches `UPSTREAM`.
 
+## Code review
+
+[`REVIEW.md`](REVIEW.md) is a full read of the plugin source at the vendored
+version, with findings judged against how the relay configures it, and the tests
+that enforce that configuration. `tests/sasl-xoauth2-sanitizers.sh` runs
+upstream's unit tests under AddressSanitizer, LeakSanitizer and
+UndefinedBehaviorSanitizer in CI.
+
 ## Updating
 
 `.github/workflows/sasl-xoauth2-watch.yml` does this automatically: daily, it
@@ -55,7 +63,8 @@ git diff -- vendor/sasl-xoauth2                # read what upstream changed
 
 Then run `tests/run-matrix.sh`; `tests/container-sasl-plugin.sh` checks each
 image was compiled from exactly the new `UPSTREAM` commit. Read upstream's
-`ChangeLog` (first entries of `src/ChangeLog`) for what changed.
+`ChangeLog` (first entries of `src/ChangeLog`) for what changed, check the code
+diff against [`REVIEW.md`](REVIEW.md), and update that review.
 
 ## License
 

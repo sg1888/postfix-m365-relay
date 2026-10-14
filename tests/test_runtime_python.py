@@ -37,6 +37,7 @@ refresh = load_module("refresh_smtp_token", "scripts/refresh-smtp-token.py")
 rotate = load_module("rotate_smtp_relay_cert", "scripts/rotate-smtp-relay-cert.py")
 qualify = load_module("qualify_relay", "scripts/qualify-relay.py")
 alert = load_module("alert_event", "scripts/alert-event.py")
+syslog_bridge = load_module("syslog_bridge", "scripts/syslog-bridge.py")
 
 
 def decode_segment(segment: str) -> dict:
@@ -973,6 +974,26 @@ class RecoveryStateMachineTests(unittest.TestCase):
                 self.assertEqual(rotate.run_recovery(rotation, env, _args()), 0)
             self.assertFalse(rotate._recovery_paths(rotation)[1].exists())
             self.assertNotIn("cert_fault_streak", rotation.read_state())
+
+
+class SyslogBridgeTests(unittest.TestCase):
+    def test_strips_glibc_header(self):
+        datagram = b"<132>Oct 14 10:50:34 smtp[42]: [sasl-xoauth2] auth failed: x\n"
+        self.assertEqual(syslog_bridge.lines_of(datagram),
+                         [b"smtp[42]: [sasl-xoauth2] auth failed: x"])
+
+    def test_strips_header_without_timestamp(self):
+        self.assertEqual(syslog_bridge.lines_of(b"<11>smtp[1]: hello"), [b"smtp[1]: hello"])
+
+    def test_one_line_per_newline_and_blank_lines_dropped(self):
+        self.assertEqual(syslog_bridge.lines_of(b"<11>a\r\n\nb\n"), [b"a", b"b"])
+
+    def test_control_characters_cannot_forge_or_hide_text(self):
+        self.assertEqual(syslog_bridge.lines_of(b"<11>x\x1b[31m\x00y"), [b"x?[31m?y"])
+
+    def test_long_lines_are_capped(self):
+        (line,) = syslog_bridge.lines_of(b"<11>" + b"a" * 10000)
+        self.assertEqual(len(line), syslog_bridge.MAX_LINE)
 
 
 if __name__ == "__main__":

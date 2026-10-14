@@ -20,6 +20,17 @@ mail-relay-spool                    named volume: queued messages and recipients
 /run/mail-relay                     tmpfs: access token, PIDs, and sasldb2
 ```
 
+On SELinux hosts (RHEL, Fedora, Rocky, Alma; Docker or Podman), the
+container cannot read a host bind mount until it is relabeled. Add `:Z` to each
+host path the relay reads, for example `./config:/config:Z`, or `:z` if another
+container must share it. Named volumes and tmpfs need no label. Without it, the
+relay fails to read `/config` and the audit log shows an AVC denial. Never
+relabel a system directory such as `/etc/letsencrypt` this way, since other
+services lose access to it. For such a mount, either have a renewal hook copy
+the files into a directory of the relay's own, or set
+`security_opt: ["label=disable"]` on the relay (this turns off SELinux
+separation for that container only).
+
 The image and container layers contain none of these values. The simplest
 single-host setup uses `/config/secrets/smtpd_users`. Compose secrets or
 Swarm secrets are hardened alternatives. The entrypoint rejects known secret

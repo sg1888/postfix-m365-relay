@@ -73,6 +73,7 @@ COPY build/postfix-m365-relay/render-config.sh build/postfix-m365-relay/verify-r
      build/postfix-m365-relay/cert-action.sh \
      scripts/alert-event.py \
      scripts/refresh-smtp-token.py \
+     scripts/syslog-bridge.py \
      scripts/rotate-smtp-relay-cert.py /usr/local/libexec/mail-relay/
 # Pure shell helpers sourced by render-config.sh / cert-action.sh. Kept in a lib/
 # subdir beside them (same relative path in repo and image) and unit-tested by

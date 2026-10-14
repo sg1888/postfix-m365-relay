@@ -107,6 +107,11 @@ run_log_stream() {
   tail -n 0 -F /var/log/mail-relay/postfix.log | grep --line-buffered -v -E \
     'smtpd\[[0-9]+\]: (connect from localhost\[127\.0\.0\.1\]|disconnect from localhost\[127\.0\.0\.1\] quit=1 commands=1)$'
 }
+run_syslog_bridge() {
+  # Carries syslog() lines from the XOAUTH2 plugin and libsasl2 (which bypass
+  # Postfix's own logger) into postfix.log; see syslog-bridge.py.
+  exec python3 /usr/local/libexec/mail-relay/syslog-bridge.py
+}
 run_role() {
   # Restartable roles run in their own session/process group.  The first live
   # supervisor used ordinary background functions.  Killing the function shell
@@ -119,6 +124,7 @@ run_role() {
     rotation) run_rotation_loop ;;
     verify) run_verify_loop ;;
     log) run_log_stream ;;
+    syslog) run_syslog_bridge ;;
     *) log "unknown restartable role: $1"; return 64 ;;
   esac
 }
@@ -129,7 +135,7 @@ spawn() {
   local role=$1
   case "$role" in
     postfix) /usr/sbin/postfix start-fg & ;;
-    token|rotation|verify|log)
+    syslog|token|rotation|verify|log)
       # Re-enter this script instead of exporting Bash functions. Exported
       # functions are process-wide input interpreted by Bash and are needlessly
       # difficult to audit. `setsid` makes the returned PID both leader and PGID.
@@ -174,7 +180,8 @@ if [[ ${1:-} == --run-role ]]; then
 fi
 
 touch /var/log/mail-relay/postfix.log
-for role in postfix token rotation verify log; do spawn "$role"; done
+# syslog first, so /dev/log exists before any Postfix process can log to it.
+for role in syslog postfix token rotation verify log; do spawn "$role"; done
 
 while (( stopping == 0 )); do
   # wait -n reports that *a* child exited; associative maps identify which one.

@@ -97,6 +97,7 @@ expiry=$(( $(date +%s) + 3600 ))
 printf '{"access_token":"offline-test-token","expiry":"%s","refresh_token":"unused-app-only-flow"}\n' \
   "$expiry" > "$fixture/relay.json"
 chmod 0644 "$fixture/relay.json"
+token_sha256=$(printf %s offline-test-token | openssl dgst -sha256 -r | cut -d' ' -f1)
 docker network create --internal "$network" >/dev/null
 
 start_case() {
@@ -107,7 +108,8 @@ start_case() {
   docker run -d --name "$upstream" --network "$network" --network-alias upstream \
     --entrypoint python3 -v "$PWD/tests":/tests:ro -v "$fixture":/data \
     "$image" /tests/fake_xoauth2_smtp.py --cert "/data/$certificate.crt" \
-    --key "/data/$certificate.key" --output /data/messages.jsonl >/dev/null
+    --key "/data/$certificate.key" --output /data/messages.jsonl \
+    --expect-token-sha256 "$token_sha256" >/dev/null
   for _attempt in {1..20}; do
     # Save before searching. With `pipefail`, `docker logs | grep -q` can report
     # 141 when grep finds READY and closes while an emulated Docker client is

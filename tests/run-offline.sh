@@ -28,6 +28,8 @@ tests=(
   container-sender-names.sh
   container-optional-sender.sh
   container-end-to-end.sh
+  container-auth-rejected.sh
+  container-token-faults.sh
   container-upstream-tls.sh
   container-spool-recovery.sh
   container-alert-incidents.sh

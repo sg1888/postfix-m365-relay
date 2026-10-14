@@ -27,6 +27,12 @@ if ! "$here/bats-unit.sh"; then
   exit 1
 fi
 
+# The vendored plugin's unit tests under sanitizers: also image-independent.
+if ! "$here/sasl-xoauth2-sanitizers.sh"; then
+  echo "sasl-xoauth2 sanitizer tests FAILED" >&2
+  exit 1
+fi
+
 # One Dockerfile, distro selected by the BASE_IMAGE build arg.
 # name | dockerfile | platform (empty = native) | extra build args
 variants=(

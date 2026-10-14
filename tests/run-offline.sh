@@ -30,6 +30,7 @@ tests=(
   container-end-to-end.sh
   container-auth-rejected.sh
   container-token-faults.sh
+  container-token-rotation-load.sh
   container-upstream-tls.sh
   container-spool-recovery.sh
   container-alert-incidents.sh

@@ -57,7 +57,7 @@ the failure, which on every failure path is an error message, not a token.
 
 - **Relay:** both settings are `no`. `tests/container-sasl-plugin.sh` fails if
   either is turned on.
-- **Upstream:** worth reporting. Secrets should be redacted even in trace mode.
+- **Upstream:** fix proposed in [#129](https://github.com/tarickb/sasl-xoauth2/pull/129) (secrets logged as `<redacted, N bytes>`).
 
 ### 2. Plugin refresh sends secrets to a configurable URL with no timeout (mitigated)
 
@@ -79,7 +79,7 @@ range. `stoi` then throws, the read fails, and every authentication fails.
 
 - **Relay:** no effect until 2038. Upstream will very likely have changed this
   by then, and the watcher will propose that release.
-- **Upstream:** use `std::stoll` into `time_t`.
+- **Upstream:** fix proposed in [#126](https://github.com/tarickb/sasl-xoauth2/pull/126) (`std::stoll` into `time_t`).
 
 ### 4. Case-insensitive yes/no parsing does not work (informational)
 
@@ -88,15 +88,20 @@ range. `stoi` then throws, the read fails, and every authentication fails.
 So `"Yes"` or `"NO"` is rejected as invalid.
 
 - **Relay:** the image writes lower-case values only.
+- **Upstream:** fix proposed in [#127](https://github.com/tarickb/sasl-xoauth2/pull/127).
 
-### 5. Server challenge logged with `%s` and no length (informational)
+### 5. Server challenge logged with `%s` and no length (low)
 
 `Client::TokenSentStep` logs `from_server` with `%s` (`client.cc:246`), which
 relies on the buffer being NUL-terminated, although the code also has its
 length.
 
-- **Relay:** Postfix decodes the challenge into a NUL-terminated buffer. The
-  line is also only kept in the in-memory trace (see finding 1).
+- **Relay:** Postfix decodes the challenge into a NUL-terminated buffer, and
+  the line is formatted even when the trace is not output.
+- **Confirmed by fuzzing:** when the fuzz harness passes the challenge without
+  a trailing NUL (allowed by the SASL API), AddressSanitizer reports a heap
+  over-read at `client.cc:246` within a minute. The harness passes it the way
+  Postfix does. Fix proposed upstream: [#128](https://github.com/tarickb/sasl-xoauth2/pull/128).
 
 ### 6. Password callback memory (not a defect)
 
@@ -107,6 +112,16 @@ allocates a new one per call and never frees it, which LeakSanitizer reports.
 `tests/sasl-xoauth2-sanitizers.sh` suppresses exactly that test function.
 
 ## What was checked and found sound
+
+- **Concurrency.** Each Postfix `smtp` process is single-threaded with its own
+  copy of the plugin; the only global state is the config, read once at load.
+  The token file is replaced by rename on the container's tmpfs, so a reader
+  sees a whole old or new file. `tests/container-token-rotation-load.sh`
+  measures this under load.
+- **Expiry margin.** The relay renews a token once it has under 30 minutes left
+  (checked every 5 minutes); the plugin treats a token as expired only in its
+  last 10 seconds (`refresh_window`). A token is always replaced at least 25
+  minutes before the plugin would try its own refresh.
 
 - **TLS before token.** The relay only allows `smtp_tls_security_level` of
   `secure` or `encrypt` (`render-config.sh`), so the token is never sent in
@@ -135,6 +150,8 @@ allocates a new one per call and never frees it, which LeakSanitizer reports.
 | `tests/container-sasl-plugin.sh` | Plugin loads; provenance matches `UPSTREAM`; refresh endpoint dead; trace logging off |
 | `tests/container-end-to-end.sh` | Postfix sends exactly the mounted token, over TLS, for the configured mailbox |
 | `tests/container-auth-rejected.sh` | A Microsoft-style 401/535 defers the message without bouncing it, and the message delivers once the token is accepted again |
+| `tests/sasl-xoauth2-fuzz.sh` | libFuzzer (with ASan and UBSan) on the three inputs the plugin parses: the token file, the server's AUTH challenge, a refresh reply. About 700,000 inputs a minute; no finding on the paths Postfix uses |
+| `tests/container-token-rotation-load.sh` | 200 messages from 8 concurrent clients while the token file is replaced ten times a second: every AUTH carries a whole valid token, nothing defers. Fails, as it should, against a rotator that writes in place |
 | `tests/container-token-faults.sh` | Expired, missing, empty and malformed token files defer the message without sending AUTH; the plugin's reason reaches the log with no token in it; a read-only root delivers; `smtp` runs outside its chroot |
 
 ## Upstream issues checked

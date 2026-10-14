@@ -32,6 +32,10 @@ if ! "$here/sasl-xoauth2-sanitizers.sh"; then
   echo "sasl-xoauth2 sanitizer tests FAILED" >&2
   exit 1
 fi
+if ! "$here/sasl-xoauth2-fuzz.sh"; then
+  echo "sasl-xoauth2 fuzzing FAILED" >&2
+  exit 1
+fi
 
 # One Dockerfile, distro selected by the BASE_IMAGE build arg.
 # name | dockerfile | platform (empty = native) | extra build args

@@ -42,6 +42,9 @@ jobs:
       # undefined behaviour the tests reach fail the run. The image is untouched.
       - name: Vendored sasl-xoauth2 under sanitizers
         run: ./tests/sasl-xoauth2-sanitizers.sh
+      # libFuzzer on the token file, the server challenge and a refresh reply.
+      - name: Fuzz vendored sasl-xoauth2
+        run: FUZZ_SECONDS=120 ./tests/sasl-xoauth2-fuzz.sh
 
   container:
     runs-on: ubuntu-latest
@@ -131,6 +134,8 @@ jobs:
         run: ./tests/container-auth-rejected.sh postfix-m365-relay:test
       - name: Token-file faults on a read-only root
         run: ./tests/container-token-faults.sh postfix-m365-relay:test
+      - name: Token rotation under concurrent load
+        run: ./tests/container-token-rotation-load.sh postfix-m365-relay:test
       # This separate drill removes and recreates the relay around an actually
       # deferred message. It guards the named spool volume contract that a
       # normal happy-path protocol test cannot prove.

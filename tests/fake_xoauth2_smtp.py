@@ -9,6 +9,8 @@ plugin that sent a stale, empty or wrong token fails delivery instead of
 passing. --reject-auth answers every AUTH the way Microsoft rejects a bad
 token: a 334 challenge carrying {"status":"401",...}, then 535 after the
 client's empty reply. --auth-log records each AUTH outcome (never the token).
+--rotating-token-key accepts only whole tokens of the form rotating_token()
+produces, for a token file that is replaced continuously under load.
 """
 
 from __future__ import annotations
@@ -23,6 +25,16 @@ import threading
 from pathlib import Path
 
 
+def rotating_token(key: str, generation: int) -> str:
+    """Token number `generation` of a rotation keyed by `key`.
+
+    About 1.5 KB, like a real Microsoft access token, so a torn or partial
+    read of the token file cannot still look valid.
+    """
+    digest = hashlib.sha256(f"{key}:{generation}".encode()).hexdigest()
+    return f"rot-{generation}-" + digest * 24
+
+
 class Sink:
     # What Microsoft sends in its 334 challenge when it rejects a token.
     REJECTION = base64.b64encode(
@@ -30,8 +42,10 @@ class Sink:
     ).decode()
 
     def __init__(self, output: Path, expect_token_sha256: str | None = None,
-                 reject_auth: bool = False, auth_log: Path | None = None):
+                 reject_auth: bool = False, auth_log: Path | None = None,
+                 rotating_token_key: str | None = None):
         self.output = output
+        self.rotating_token_key = rotating_token_key
         self.expect_token_sha256 = expect_token_sha256
         self.reject_auth = reject_auth
         self.auth_log = auth_log
@@ -49,6 +63,12 @@ class Sink:
     def authenticate(self, stream, argument: str) -> str | None:
         """Answer one AUTH command; return the authenticated user or None."""
         mechanism, _, encoded = argument.partition(" ")
+        if not encoded:
+            # No initial response: a client whose response is too long for the
+            # AUTH line (Postfix, with a real ~1.5-2.5 KB Microsoft token) sends
+            # bare "AUTH XOAUTH2", waits for an empty 334, then sends it alone.
+            self.send(stream, "334 ")
+            encoded = stream.readline().decode(errors="replace").strip()
         try:
             decoded = base64.b64decode(encoded).decode(errors="replace")
         except ValueError:
@@ -59,6 +79,12 @@ class Sink:
         )
         auth = fields.get("auth", "")
         token = auth.removeprefix("Bearer ") if auth.startswith("Bearer ") else None
+        generation = None
+        if token and self.rotating_token_key:
+            try:
+                generation = int(token.split("-")[1])
+            except (IndexError, ValueError):
+                generation = -1
         if mechanism.upper() != "XOAUTH2" or not fields.get("user") or not token:
             result = "malformed"
         elif self.reject_auth:
@@ -66,10 +92,16 @@ class Sink:
         elif self.expect_token_sha256 and \
                 hashlib.sha256(token.encode()).hexdigest() != self.expect_token_sha256:
             result = "wrong-token"
+        elif self.rotating_token_key and \
+                token != rotating_token(self.rotating_token_key, generation):
+            result = "wrong-token"
         else:
             result = "accepted"
         if self.auth_log:
-            self.record({"result": result, "user": fields.get("user")}, self.auth_log)
+            entry = {"result": result, "user": fields.get("user")}
+            if generation is not None:
+                entry["generation"] = generation
+            self.record(entry, self.auth_log)
         if result == "accepted":
             self.send(stream, "235 2.7.0 Authentication successful")
             return fields["user"]
@@ -176,11 +208,13 @@ def main() -> None:
     parser.add_argument("--expect-token-sha256")
     parser.add_argument("--reject-auth", action="store_true")
     parser.add_argument("--auth-log", type=Path)
+    parser.add_argument("--rotating-token-key")
     args = parser.parse_args()
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(args.cert, args.key)
-    sink = Sink(args.output, args.expect_token_sha256, args.reject_auth, args.auth_log)
+    sink = Sink(args.output, args.expect_token_sha256, args.reject_auth, args.auth_log,
+                args.rotating_token_key)
     with socket.create_server(("0.0.0.0", args.port), reuse_port=True) as listener:
         print(f"READY fake XOAUTH2 SMTP sink on {args.port}", flush=True)
         while True:

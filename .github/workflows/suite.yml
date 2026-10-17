@@ -22,6 +22,10 @@ on:
         required: false
         default: false
 
+# Each test step runs only if the checked-out ref has that test. The scheduled
+# rebuild tests an older release tag with this (newer) file, and a test added
+# since that release has nothing to test there. For pushes and PRs (ref empty)
+# every step always runs, so a missing or renamed test still fails CI.
 jobs:
   # Host-side unit tests for the pure shell helpers (lib/text.sh). Container-free
   # and distro-independent, so they run as a fast standalone job.
@@ -32,6 +36,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: Shell unit tests (bats)
+        if: inputs.ref == '' || hashFiles('tests/bats-unit.sh') != ''
         run: ./tests/bats-unit.sh
       # Offline, tests/static.sh proves vendor/sasl-xoauth2/src matches the
       # recorded tree hash. This adds the online half: upstream's commit really
@@ -41,9 +46,11 @@ jobs:
       # Upstream's unit tests under ASan/LSan/UBSan: memory errors, leaks and
       # undefined behaviour the tests reach fail the run. The image is untouched.
       - name: Vendored sasl-xoauth2 under sanitizers
+        if: inputs.ref == '' || hashFiles('tests/sasl-xoauth2-sanitizers.sh') != ''
         run: ./tests/sasl-xoauth2-sanitizers.sh
       # libFuzzer on the token file, the server challenge and a refresh reply.
       - name: Fuzz vendored sasl-xoauth2
+        if: inputs.ref == '' || hashFiles('tests/sasl-xoauth2-fuzz.sh') != ''
         run: FUZZ_SECONDS=120 ./tests/sasl-xoauth2-fuzz.sh
 
   container:
@@ -72,6 +79,7 @@ jobs:
       # Static checks run before package downloads so basic syntax failures are
       # reported quickly and do not consume Buildx/QEMU time.
       - name: Static audit
+        if: inputs.ref == '' || hashFiles('tests/static.sh') != ''
         run: ./tests/static.sh
       # YAML parsing catches indentation; Compose's own parser additionally
       # validates service, mount, network, secret, and interpolation semantics.
@@ -119,51 +127,74 @@ jobs:
       # These suites use only example.invalid identities and --network none for
       # credential logic. They never contact Microsoft or a production relay.
       - name: Offline Python credential tests
+        if: inputs.ref == '' || hashFiles('tests/python-unit.sh') != ''
         run: ./tests/python-unit.sh postfix-m365-relay:test
       - name: XOAUTH2 plugin provenance and loading
+        if: inputs.ref == '' || hashFiles('tests/container-sasl-plugin.sh') != ''
         run: ./tests/container-sasl-plugin.sh postfix-m365-relay:test
       - name: Image size budget and trimming
+        if: inputs.ref == '' || hashFiles('tests/container-image-size.sh') != ''
         run: ./tests/container-image-size.sh postfix-m365-relay:test
       - name: Sender-name and regexp-map tests
+        if: inputs.ref == '' || hashFiles('tests/container-sender-names.sh') != ''
         run: ./tests/container-sender-names.sh postfix-m365-relay:test
       - name: Optional-sender and sender-allowlist tests
+        if: inputs.ref == '' || hashFiles('tests/container-optional-sender.sh') != ''
         run: ./tests/container-optional-sender.sh postfix-m365-relay:test
       - name: Real Postfix-to-XOAUTH2 sink integration
+        if: inputs.ref == '' || hashFiles('tests/container-end-to-end.sh') != ''
         run: ./tests/container-end-to-end.sh postfix-m365-relay:test
       - name: Rejected XOAUTH2 defers, then delivers
+        if: inputs.ref == '' || hashFiles('tests/container-auth-rejected.sh') != ''
         run: ./tests/container-auth-rejected.sh postfix-m365-relay:test
       - name: Token-file faults on a read-only root
+        if: inputs.ref == '' || hashFiles('tests/container-token-faults.sh') != ''
         run: ./tests/container-token-faults.sh postfix-m365-relay:test
       - name: Token rotation under concurrent load
+        if: inputs.ref == '' || hashFiles('tests/container-token-rotation-load.sh') != ''
         run: ./tests/container-token-rotation-load.sh postfix-m365-relay:test
       # This separate drill removes and recreates the relay around an actually
       # deferred message. It guards the named spool volume contract that a
       # normal happy-path protocol test cannot prove.
       - name: Persistent spool replacement and recovery
+        if: inputs.ref == '' || hashFiles('tests/container-spool-recovery.sh') != ''
         run: ./tests/container-spool-recovery.sh postfix-m365-relay:test
       - name: Durable alert incidents and independent channels
+        if: inputs.ref == '' || hashFiles('tests/container-alert-incidents.sh') != ''
         run: ./tests/container-alert-incidents.sh postfix-m365-relay:test
       - name: Automatic alert trigger matrix
+        if: inputs.ref == '' || hashFiles('tests/container-alert-trigger-matrix.sh') != ''
         run: ./tests/container-alert-trigger-matrix.sh postfix-m365-relay:test
       - name: OAuth rotation alert
+        if: inputs.ref == '' || hashFiles('tests/container-oauth-rotation-alert.sh') != ''
         run: ./tests/container-oauth-rotation-alert.sh postfix-m365-relay:test
       - name: Managed inbound TLS rotation alert
+        if: inputs.ref == '' || hashFiles('tests/container-inbound-tls-rotation-alert.sh') != ''
         run: ./tests/container-inbound-tls-rotation-alert.sh postfix-m365-relay:test
       - name: Invalid passthrough alias alert
+        if: inputs.ref == '' || hashFiles('tests/container-invalid-alias-alert.sh') != ''
         run: ./tests/container-invalid-alias-alert.sh postfix-m365-relay:test
       - name: Outbound STARTTLS certificate matrix
+        if: inputs.ref == '' || hashFiles('tests/container-upstream-tls.sh') != ''
         run: ./tests/container-upstream-tls.sh postfix-m365-relay:test
       - name: Configuration matrix
+        if: inputs.ref == '' || hashFiles('tests/container-config-matrix.sh') != ''
         run: ./tests/container-config-matrix.sh postfix-m365-relay:test
       - name: First-run persistent configuration
+        if: inputs.ref == '' || hashFiles('tests/container-first-run-config.sh') != ''
         run: ./tests/container-first-run-config.sh postfix-m365-relay:test
       - name: SASL user and Docker-secret lifecycle
+        if: inputs.ref == '' || hashFiles('tests/container-sasl-user-lifecycle.sh') != ''
         run: ./tests/container-sasl-user-lifecycle.sh postfix-m365-relay:test
       - name: Remote network policy truth tables
+        if: inputs.ref == '' || hashFiles('tests/container-network-policy.sh') != ''
         run: ./tests/container-network-policy.sh postfix-m365-relay:test
       - name: Certificate import and separation matrix
+        if: inputs.ref == '' || hashFiles('tests/container-certificates.sh') != ''
         run: ./tests/container-certificates.sh postfix-m365-relay:test
       - name: Inbound fullchain and renewal handshake
+        if: inputs.ref == '' || hashFiles('tests/container-inbound-fullchain.sh') != ''
         run: ./tests/container-inbound-fullchain.sh postfix-m365-relay:test
       - name: Security, supervisor, and read-only tests
+        if: inputs.ref == '' || hashFiles('tests/container-policy.sh') != ''
         run: ./tests/container-policy.sh postfix-m365-relay:test

@@ -4,10 +4,12 @@ name: publish image
 #   1. A maintainer pushes a v* tag. That tag is built and published.
 #   2. Automatic refresh. Daily, the "plan" job asks each published variant of
 #      the newest release which distro updates it is missing
-#      (.github/scripts/pending-updates.sh). If any is a key package (Postfix,
-#      SASL, OpenSSL, the CA bundle, Python cryptography, curl, glibc, ...) or a
-#      security fix, it releases the next patch version (v1.1.0 -> v1.1.1) from
-#      the same source commit with current packages. Otherwise nothing happens.
+#      (.github/scripts/pending-updates.sh) and scans it with Trivy. It releases
+#      the next patch version (v1.1.0 -> v1.1.1) from the same source commit
+#      with current packages only when .github/scripts/refresh-decision.sh says
+#      so: at once for a CRITICAL or HIGH CVE that a rebuild fixes, otherwise
+#      on the first run of a month with anything pending and no release yet
+#      that month. This keeps the number of versions small.
 # Nothing is pushed before it passes: the full test suite (every distro, fresh
 # packages, Trivy), then per variant a from-scratch build whose exact layers are
 # scanned, container-tested and package-checked on every platform before the
@@ -21,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: release a refresh even if no key or security update is pending
+        description: release a refresh now, without waiting for the monthly release
         type: boolean
         default: false
 
@@ -46,11 +48,18 @@ jobs:
       stable: ${{ steps.plan.outputs.stable }}
       create_tag: ${{ steps.plan.outputs.create_tag }}
       base_version: ${{ steps.plan.outputs.base_version }}
+      reason: ${{ steps.plan.outputs.reason }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: docker/setup-qemu-action@v4
+      # The same Trivy as the test suite's scan (trivy-action v0.36.0).
+      - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        if: github.event_name != 'push'
+        with:
+          version: v0.70.0
+          cache: true
       - id: plan
         env:
           IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
@@ -109,6 +118,18 @@ jobs:
             if ! .github/scripts/pending-updates.sh "$IMAGE:$tag" "$platform" >> updates.txt; then
               echo "image $IMAGE:$tag could not be checked [unchecked]" >> updates.txt
             fi
+            # Serious vulnerabilities with a fixed version available, read from the
+            # registry (the published image, not a local copy). One line
+            # per CVE and package: cve <id> <severity> <package> <installed> -> <fixed>
+            if trivy image --image-src remote --quiet --platform "$platform" --scanners vuln \
+                --severity CRITICAL,HIGH --ignore-unfixed --format json \
+                --output trivy.json "$IMAGE:$tag"; then
+              jq -r '.Results[]?.Vulnerabilities[]? |
+                "cve \(.VulnerabilityID) \(.Severity) \(.PkgName) \(.InstalledVersion) -> \(.FixedVersion | gsub(" "; ""))"' \
+                trivy.json | sort -u >> updates.txt
+            else
+              echo "image $IMAGE:$tag could not be scanned [unchecked]" >> updates.txt
+            fi
           done
 
           # A check that could not run is not a reason to release: on
@@ -120,7 +141,14 @@ jobs:
             exit 1
           fi
 
-          if grep -Eq '\[(key|security)\]' updates.txt || [ "$FORCE" = true ]; then
+          last_month=$(TZ=UTC git for-each-ref "refs/tags/$last" --format='%(creatordate:format-local:%Y-%m)')
+          decision=$(.github/scripts/refresh-decision.sh updates.txt "$last_month" "$(date -u +%Y-%m)" "$FORCE")
+          publish=$(sed -n 's/^publish=//p' <<< "$decision")
+          reason=$(sed -n 's/^reason=//p' <<< "$decision")
+          while IFS= read -r note; do
+            [ -n "$note" ] && echo "::warning::$note"
+          done < <(sed -n 's/^note=//p' <<< "$decision")
+          if [ "$publish" = true ]; then
             IFS=. read -r major minor patch <<< "$v"
             next="v${major}.${minor}.$((patch + 1))"
             # A tag of that name can only exist if a previous refresh pushed it and
@@ -129,20 +157,21 @@ jobs:
               echo "::error::$next already exists but is not the newest release; fix the tags by hand"
               exit 1
             fi
-            publish=true
           else
-            next="$last"; publish=false
+            next="$last"
           fi
           {
             echo "publish=$publish"; echo "version=$next"; echo "sha=$sha"
             echo "stable=true"; echo "create_tag=$publish"; echo "base_version=$last"
+            echo "reason=$reason"
           } >> "$GITHUB_OUTPUT"
           {
             if [ "$publish" = true ]; then
               echo "Refresh: releasing $next (from $last, commit ${sha:0:12}) with current packages."
             else
-              echo "No key or security update pending for $last; nothing to release."
+              echo "No release today for $last."
             fi
+            echo; echo "Decision: $reason"
             echo; echo '```'; cat updates.txt; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
@@ -177,6 +206,7 @@ jobs:
           RELEASE: ${{ needs.plan.outputs.base_version }}
           PUBLISH: ${{ needs.plan.outputs.publish }}
           NEXT: ${{ needs.plan.outputs.version }}
+          REASON: ${{ needs.plan.outputs.reason }}
         run: |
           age_days=$(( ($(date +%s) - $(git log -1 --format=%ct)) / 86400 ))
           echo "last commit on main: $age_days days ago"
@@ -193,7 +223,7 @@ jobs:
             if [ "$PUBLISH" = true ]; then
               echo "- Result: releasing $NEXT"
             else
-              echo "- Result: no key or security update pending"
+              echo "- Result: no release (${REASON:-unknown})"
             fi
             if [ -s updates.txt ]; then
               echo; echo "## Pending updates"; echo; echo '```'; cat updates.txt; echo '```'
@@ -682,6 +712,7 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
           BASE: ${{ needs.plan.outputs.base_version }}
           REFRESH: ${{ needs.plan.outputs.create_tag }}
+          REASON: ${{ needs.plan.outputs.reason }}
           STABLE: ${{ needs.plan.outputs.stable }}
           DIGEST: ${{ needs.build-ubuntu.outputs.digest }}
           IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
@@ -693,12 +724,14 @@ jobs:
           if [ "$REFRESH" = true ]; then
             {
               echo "Automatic package refresh of $BASE. Same source code; the image was"
-              echo "rebuilt with current distro packages because these updates were pending"
-              echo "([key] = a package the relay depends on directly, [security] = a distro"
-              echo "security fix):"
+              echo "rebuilt with current distro packages. Why now: $REASON."
+              echo
+              echo "Fixed vulnerabilities (cve lines, CRITICAL or HIGH) and updates to key"
+              echo "packages or distro security fixes ([key] = a package the relay depends"
+              echo "on directly, [security] = a distro security fix):"
               echo
               echo '```'
-              grep -E '^## |\[(key|security)\]' updates.txt || true
+              grep -E '^## |^cve |\[(key|security)\]' updates.txt || true
               echo '```'
               echo
               echo "<details><summary>All pending updates</summary>"

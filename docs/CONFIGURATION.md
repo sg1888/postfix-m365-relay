@@ -397,8 +397,8 @@ distro packages, CA bundle included, were refreshed more than
 `/usr/share/postfix-m365-relay/packages-refreshed`, stamped by the build in the
 same layer as the package upgrade, not from the `ca-certificates` package date
 (distros can rightly ship one bundle for months). Published images are
-refreshed whenever a key or security update is pending, so
-the incident means your container hasn't moved to a newer image. Repeated
+refreshed at least monthly when updates are pending, and at once for a fixable
+CRITICAL or HIGH vulnerability, so the incident means your container hasn't moved to a newer image. Repeated
 checks update it without duplicates. A tested image replacement clears it with
 the same reference and elapsed duration. This doesn't mutate running images.
 Raise the threshold only if your org has a different documented patch cadence.

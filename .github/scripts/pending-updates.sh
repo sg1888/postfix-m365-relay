@@ -8,7 +8,8 @@
 #              <package> <installed> -> <available> [key] [security]
 #            [key]      the package is one the relay depends on directly (list below)
 #            [security] the distro published the update as a security fix
-#            A release is warranted when any line carries [key] or [security].
+#            .github/scripts/refresh-decision.sh decides from this list and a
+#            Trivy scan whether to release now or wait for the monthly release.
 # Called by: .github/workflows/publish-image.yml (job "plan"), once per variant.
 # When:      Daily schedule and manual runs of that workflow; by hand to preview.
 # Created:   2026-10-12

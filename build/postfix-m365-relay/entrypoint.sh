@@ -83,6 +83,61 @@ load_config_file() {
   log "loaded persistent configuration from $CONFIG_FILE (environment overrides preserved)"
 }
 
+# Startup banner: what is running, so a log or a support request shows it at a
+# glance. The release values come from /usr/share/postfix-m365-relay/release,
+# written by the Dockerfile from build arguments the publish workflow sets; a
+# local or CI build has none and says so. The file is read as KEY=value data
+# (never sourced), and every value is reduced to printable characters.
+RELEASE_FILE=/usr/share/postfix-m365-relay/release
+banner_value() {
+  local value=$1
+  value=${value//[^[:print:]]/}
+  printf '%s' "${value:0:80}"
+}
+print_banner() {
+  local line name value rule version variant released revision os postfix sxo
+  declare -A release=()
+  if [[ -r $RELEASE_FILE ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+      [[ $line == *=* ]] || continue
+      name=${line%%=*}; value=${line#*=}
+      [[ $name =~ ^[a-z]+$ ]] && release[$name]=$(banner_value "$value")
+    done < "$RELEASE_FILE"
+  fi
+  version=${release[version]:-}; variant=${release[variant]:-}
+  released=${release[released]:-}; revision=${release[revision]:-}
+  if [[ -n $version ]]; then
+    version="$version${variant:+ ($variant)}"
+  else
+    version='development build (not a published release)'
+  fi
+  # shellcheck source=/dev/null
+  os=$( { . /etc/os-release && printf '%s' "${PRETTY_NAME:-$NAME $VERSION_ID}"; } 2>/dev/null || true)
+  postfix=$(postconf -h mail_version 2>/dev/null || true)
+  if [[ -r /usr/share/postfix-m365-relay/sasl-xoauth2.source ]]; then
+    sxo=$(sed -n 's/^version=//p' /usr/share/postfix-m365-relay/sasl-xoauth2.source)
+    value=$(sed -n 's/^commit=//p' /usr/share/postfix-m365-relay/sasl-xoauth2.source)
+    sxo="$sxo (built from source${value:+, ${value:0:7}})"
+  elif value=$(rpm -q --qf '%{VERSION}' sasl-xoauth2 2>/dev/null); then
+    sxo="$value (EPEL)"
+  fi
+  rule='────────────────────────────────────────────────────────────'
+  printf '%s\n' "$rule" 'Postfix M365 Relay' "$rule"
+  printf '%-15s %s\n' 'Version:' "$version"
+  [[ -z $released ]] || printf '%-15s %s\n' 'Released:' "$released"
+  [[ -z $revision ]] || printf '%-15s %s\n' 'Commit:' "${revision:0:12}"
+  printf '%-15s %s\n' 'Base OS:' "$(banner_value "${os:-unknown}")"
+  printf '%-15s %s\n' 'Postfix:' "$(banner_value "${postfix:-unknown}")"
+  printf '%-15s %s\n' 'sasl-xoauth2:' "$(banner_value "${sxo:-unknown}")"
+  printf '%-15s %s\n' 'Source:' 'https://github.com/sg1888/postfix-m365-relay'
+  printf '%s\n' "$rule"
+}
+# Once per container start: setup mode re-executes this script.
+if [[ -z ${MAIL_RELAY_BANNER_SHOWN:-} ]]; then
+  print_banner
+  export MAIL_RELAY_BANNER_SHOWN=1
+fi
+
 if ! configuration_is_complete; then
   if [[ ! -e $CONFIG_FILE ]]; then
     config_dir=${CONFIG_FILE%/*}

@@ -24,6 +24,7 @@ jobs=${TEST_JOBS:-$default_jobs}
 tests=(
   python-unit.sh
   container-sasl-plugin.sh
+  container-version-banner.sh
   container-image-size.sh
   container-sender-names.sh
   container-optional-sender.sh

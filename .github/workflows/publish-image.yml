@@ -50,6 +50,7 @@ jobs:
       create_tag: ${{ steps.plan.outputs.create_tag }}
       base_version: ${{ steps.plan.outputs.base_version }}
       reason: ${{ steps.plan.outputs.reason }}
+      released: ${{ steps.plan.outputs.released }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -66,6 +67,8 @@ jobs:
           IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
           FORCE: ${{ inputs.force || false }}
         run: |
+          # The release date every variant's startup banner shows.
+          echo "released=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
           if [ "${GITHUB_EVENT_NAME}" = push ]; then
             # The tag an automatic refresh creates (job tag-release) also
             # arrives here as a tag push; its images are already published.
@@ -306,6 +309,10 @@ jobs:
       - id: build
         uses: ./.github/actions/build-test-push
         with:
+          relay-version: ${{ needs.plan.outputs.version }}
+          relay-variant: ubuntu
+          relay-released: ${{ needs.plan.outputs.released }}
+          relay-revision: ${{ needs.plan.outputs.sha }}
           base-image: ubuntu:24.04
           platforms: linux/amd64,linux/arm64
           test-platform: linux/amd64
@@ -379,6 +386,10 @@ jobs:
       - id: build
         uses: ./.github/actions/build-test-push
         with:
+          relay-version: ${{ needs.plan.outputs.version }}
+          relay-variant: alma-v3
+          relay-released: ${{ needs.plan.outputs.released }}
+          relay-revision: ${{ needs.plan.outputs.sha }}
           base-image: almalinux:10
           platforms: linux/amd64,linux/arm64
           test-platform: linux/amd64
@@ -444,6 +455,10 @@ jobs:
       - id: build
         uses: ./.github/actions/build-test-push
         with:
+          relay-version: ${{ needs.plan.outputs.version }}
+          relay-variant: alma-v2
+          relay-released: ${{ needs.plan.outputs.released }}
+          relay-revision: ${{ needs.plan.outputs.sha }}
           base-image: almalinux/10-base:10
           # EXPECT_ALMALINUX_ARCH prevents a superficially successful v2-tagged
           # build from using the normal v3 base. This exact omission produced a
@@ -506,6 +521,10 @@ jobs:
       - id: build
         uses: ./.github/actions/build-test-push
         with:
+          relay-version: ${{ needs.plan.outputs.version }}
+          relay-variant: debian
+          relay-released: ${{ needs.plan.outputs.released }}
+          relay-revision: ${{ needs.plan.outputs.sha }}
           base-image: debian:trixie-slim
           platforms: linux/amd64,linux/arm64
           test-platform: linux/amd64
@@ -569,6 +588,10 @@ jobs:
       - id: build
         uses: ./.github/actions/build-test-push
         with:
+          relay-version: ${{ needs.plan.outputs.version }}
+          relay-variant: alpine
+          relay-released: ${{ needs.plan.outputs.released }}
+          relay-revision: ${{ needs.plan.outputs.sha }}
           base-image: alpine:3.22
           platforms: linux/amd64,linux/arm64
           test-platform: linux/amd64

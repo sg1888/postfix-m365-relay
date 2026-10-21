@@ -30,6 +30,11 @@ docker exec postfix-m365-relay postqueue -p
 docker exec postfix-m365-relay postconf -n
 ```
 
+Every start begins with a banner naming the relay version, its release date
+and commit, the base OS, and the Postfix and sasl-xoauth2 versions. Quote it
+in any bug report. `docker logs postfix-m365-relay 2>&1 | head -12` shows it.
+An image you built yourself says "development build".
+
 ## First boot
 
 1. Start with an empty `./mail-relay` bind and empty state volume.

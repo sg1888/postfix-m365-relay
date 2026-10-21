@@ -14,6 +14,18 @@ inputs:
     description: additional build args, one KEY=value per line
     required: false
     default: ''
+  relay-version:
+    description: the release being built (v1.2.3 or 1.2.3), shown in the startup banner
+    required: true
+  relay-variant:
+    description: the variant name shown in the startup banner (ubuntu, debian, alpine, alma-v3, alma-v2)
+    required: true
+  relay-released:
+    description: release date (YYYY-MM-DD) shown in the startup banner
+    required: true
+  relay-revision:
+    description: the source commit being built
+    required: true
   platforms:
     description: comma-separated platforms to publish
     required: true
@@ -55,10 +67,18 @@ runs:
       env:
         BASE_REF: ${{ steps.base.outputs.ref }}
         EXTRA: ${{ inputs.extra-build-args }}
+        VERSION: ${{ inputs.relay-version }}
+        VARIANT: ${{ inputs.relay-variant }}
+        RELEASED: ${{ inputs.relay-released }}
+        REVISION: ${{ inputs.relay-revision }}
       run: |
         {
           echo 'list<<BUILD_ARGS_EOF'
           echo "BASE_IMAGE=$BASE_REF"
+          echo "RELAY_VERSION=${VERSION#v}"
+          echo "RELAY_VARIANT=$VARIANT"
+          echo "RELAY_RELEASED=$RELEASED"
+          echo "RELAY_REVISION=$REVISION"
           [ -z "$EXTRA" ] || printf '%s\n' "$EXTRA"
           echo 'BUILD_ARGS_EOF'
         } >> "$GITHUB_OUTPUT"
@@ -108,7 +128,10 @@ runs:
     # security/supervisor/read-only policy.
     - name: Container tests on the candidate
       shell: bash
+      env:
+        VERSION: ${{ inputs.relay-version }}
       run: |
+        ./tests/container-version-banner.sh postfix-m365-relay:candidate "${VERSION#v}"
         ./tests/python-unit.sh postfix-m365-relay:candidate
         ./tests/container-sasl-plugin.sh postfix-m365-relay:candidate
         ./tests/container-image-size.sh postfix-m365-relay:candidate

@@ -84,6 +84,17 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/relay-supervisor.sh \
       /usr/local/bin/relay-users /usr/local/bin/relay-admin /usr/local/bin/export-cert \
       /usr/local/libexec/mail-relay/*
 
+# What this image is, shown in the startup banner (entrypoint.sh). The publish
+# workflow sets these; a local or CI build leaves them empty and the banner says
+# "development build". Last, so a new version reuses every layer above.
+ARG RELAY_VERSION=
+ARG RELAY_VARIANT=
+ARG RELAY_RELEASED=
+ARG RELAY_REVISION=
+RUN printf 'version=%s\nvariant=%s\nreleased=%s\nrevision=%s\n' \
+      "$RELAY_VERSION" "$RELAY_VARIANT" "$RELAY_RELEASED" "$RELAY_REVISION" \
+      > /usr/share/postfix-m365-relay/release
+
 # Documentation only; the relay is reachable on the mail network and publishes
 # no host port. 2525 rather than 587 so the container needs no
 # CAP_NET_BIND_SERVICE.

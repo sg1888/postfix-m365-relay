@@ -7,9 +7,10 @@ name: publish image
 #      (.github/scripts/pending-updates.sh) and scans it with Trivy. It releases
 #      the next patch version (v1.1.0 -> v1.1.1) from the same source commit
 #      with current packages only when .github/scripts/refresh-decision.sh says
-#      so: at once for a CRITICAL or HIGH CVE that a rebuild fixes, otherwise
-#      on the first run of a month with anything pending and no release yet
-#      that month. This keeps the number of versions small.
+#      so: for a CRITICAL or HIGH CVE that a rebuild fixes (which also ships
+#      every other pending update), or as a backstop once the newest release
+#      is 60 days old, before the relay's 90-day image-age alert. This keeps
+#      the number of versions small.
 # Nothing is pushed before it passes: the full test suite (every distro, fresh
 # packages, Trivy), then per variant a from-scratch build whose exact layers are
 # scanned, container-tested and package-checked on every platform before the
@@ -23,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: release a refresh now, without waiting for the monthly release
+        description: release a refresh now, even without a serious CVE
         type: boolean
         default: false
 
@@ -141,8 +142,8 @@ jobs:
             exit 1
           fi
 
-          last_month=$(TZ=UTC git for-each-ref "refs/tags/$last" --format='%(creatordate:format-local:%Y-%m)')
-          decision=$(.github/scripts/refresh-decision.sh updates.txt "$last_month" "$(date -u +%Y-%m)" "$FORCE")
+          released=$(git for-each-ref "refs/tags/$last" --format='%(creatordate:unix)')
+          decision=$(.github/scripts/refresh-decision.sh updates.txt "$released" "$(date +%s)" "$FORCE")
           publish=$(sed -n 's/^publish=//p' <<< "$decision")
           reason=$(sed -n 's/^reason=//p' <<< "$decision")
           while IFS= read -r note; do

@@ -9,7 +9,7 @@
 #            [key]      the package is one the relay depends on directly (list below)
 #            [security] the distro published the update as a security fix
 #            .github/scripts/refresh-decision.sh decides from this list and a
-#            Trivy scan whether to release now or wait for the monthly release.
+#            Trivy scan whether to release now.
 # Called by: .github/workflows/publish-image.yml (job "plan"), once per variant.
 # When:      Daily schedule and manual runs of that workflow; by hand to preview.
 # Created:   2026-10-12

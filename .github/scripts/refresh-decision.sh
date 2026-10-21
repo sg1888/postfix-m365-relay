@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Decide whether the scheduled package refresh releases today.
 #
-# Purpose:   Keep automatic releases few. A refresh releases at once only for a
-#            serious vulnerability it can actually fix; every other pending
-#            update waits for the monthly release.
+# Purpose:   Keep automatic releases few. A refresh releases only for a serious
+#            vulnerability it can actually fix; every other pending update waits
+#            and ships with that release (a rebuild installs all of them).
 #              urgent   a CRITICAL or HIGH CVE with a fixed version (Trivy) in a
 #                       package that has a pending update in the same image, so
 #                       rebuilding fixes it
-#              monthly  anything pending, and no release yet this calendar month
-#                       (any release counts: manual, monthly or urgent)
+#              backstop anything pending, and the newest release (of any kind)
+#                       is at least 60 days old. The relay alerts when
+#                       its image packages and CA bundle are 90 days old
+#                       (MAIL_CA_BUNDLE_MAX_AGE_DAYS); this releases before that,
+#                       and carries CA bundle changes, which are never CVEs
 #              force    a manual run with force=true
 #            A CVE whose package has no pending update is reported but does not
 #            release: a rebuild would not fix it (for example a Python package
@@ -16,23 +19,25 @@
 #            every day.
 # Called by: .github/workflows/publish-image.yml (job "plan").
 # Created:   2026-10-21
-# Usage:     .github/scripts/refresh-decision.sh UPDATES LAST_MONTH THIS_MONTH [FORCE]
+# Usage:     .github/scripts/refresh-decision.sh UPDATES RELEASE_EPOCH NOW_EPOCH [FORCE]
 #              UPDATES     file of sections, one per published image:
 #                            ## <tag>
 #                            <package> <installed> -> <available> [key] [security]
 #                            cve <id> <severity> <package> <installed> -> <fixed>
 #                          (package lines from pending-updates.sh, cve lines from Trivy)
-#              LAST_MONTH  YYYY-MM the newest release was created
-#              THIS_MONTH  YYYY-MM today
-#              FORCE       true to release regardless
+#              RELEASE_EPOCH  when the newest release was created (Unix time)
+#              NOW_EPOCH      now (Unix time)
+#              FORCE          true to release regardless
 #            Prints "publish=true|false" and "reason=<one line>", then one
 #            "note=<line>" per CVE that no rebuild can fix.
 set -euo pipefail
 
-updates=${1:?usage: refresh-decision.sh UPDATES LAST_MONTH THIS_MONTH [FORCE]}
-last_month=${2:?last release month (YYYY-MM) required}
-this_month=${3:?current month (YYYY-MM) required}
+updates=${1:?usage: refresh-decision.sh UPDATES RELEASE_EPOCH NOW_EPOCH [FORCE]}
+release_epoch=${2:?newest release time (Unix) required}
+now_epoch=${3:?current time (Unix) required}
 force=${4:-false}
+backstop_days=60
+age_days=$(( (now_epoch - release_epoch) / 86400 ))
 
 # One pass: per section, remember which packages have a pending update, then
 # sort each CVE into fixable (urgent) or not.
@@ -59,12 +64,12 @@ if [ -n "$urgent" ]; then
 elif [ "$force" = true ]; then
   echo "publish=true"
   echo "reason=forced by a manual run ($count pending updates)"
-elif [ "$count" -gt 0 ] && [[ $last_month < $this_month ]]; then
+elif [ "$count" -gt 0 ] && [ "$age_days" -ge "$backstop_days" ]; then
   echo "publish=true"
-  echo "reason=monthly: $count pending updates, no release yet in $this_month"
+  echo "reason=backstop: $count pending updates and the newest release is $age_days days old"
 elif [ "$count" -gt 0 ]; then
   echo "publish=false"
-  echo "reason=$count pending updates held for the monthly release (already released in $this_month)"
+  echo "reason=$count pending updates held: no fixable CRITICAL or HIGH CVE, newest release $age_days days old (backstop at $backstop_days)"
 else
   echo "publish=false"
   echo "reason=nothing pending"

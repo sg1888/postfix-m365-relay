@@ -194,7 +194,7 @@ The two sources update differently, and both are automatic up to a review:
   floor (`SXO_EPEL_MIN_VERSION` in `postfix-install.sh`, currently 0.27), never
   an exact version. `sasl-xoauth2` is a key package in the daily refresh
   (`publish-image.yml`, `.github/scripts/pending-updates.sh`): when EPEL ships a
-  newer one, the next refresh release (monthly, or sooner for a serious CVE)
+  newer one, the next refresh release (for a serious CVE, or within 60 days)
   rebuilds the Alma images with it, runs the full suite, and publishes the next
   patch release. Nothing has to be edited.
 - **Ubuntu, Debian, Alpine (vendored source).** No distro update changes the

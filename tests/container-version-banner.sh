@@ -31,37 +31,45 @@ banner_of() {
   done
   docker logs "$name" 2>&1
 }
+# The banner's lines with the box borders and padding removed.
+unboxed() { sed -n 's/^| *//; s/ *|$//p' <<< "$1"; }
 
-logs=$(banner_of)
-grep -qx 'Postfix M365 Relay' <<< "$logs" || { echo "no banner title:" >&2; echo "$logs" >&2; exit 1; }
-[[ $(head -n2 <<< "$logs" | tail -n1) == 'Postfix M365 Relay' ]] || { echo "banner is not first" >&2; exit 1; }
+raw=$(banner_of)
+logs=$(unboxed "$raw")
+grep -qx 'Starting Postfix M365 Relay' <<< "$logs" || { echo "no banner title:" >&2; echo "$raw" >&2; exit 1; }
+[[ $(head -n1 <<< "$raw") =~ ^/-{68}\\$ ]] || { echo "banner is not first, or not boxed" >&2; echo "$raw" >&2; exit 1; }
+[[ $(head -n2 <<< "$raw" | tail -n1) =~ ^\|\ +Starting\ Postfix\ M365\ Relay\ +\|$ ]] || { echo "title is not the banner's first line" >&2; exit 1; }
+[[ -z $(grep -E '^[|/\\]' <<< "$raw" | awk 'length != 70') ]] || { echo "banner box lines are uneven" >&2; echo "$raw" >&2; exit 1; }
 postfix=$(docker run --rm --entrypoint postconf "$image" -h mail_version)
 grep -Eq "^Postfix: +${postfix//./\\.}$" <<< "$logs" || { echo "Postfix $postfix not in banner" >&2; exit 1; }
 grep -Eq '^sasl-xoauth2: +[0-9]+\.[0-9]+' <<< "$logs" || { echo "no sasl-xoauth2 version" >&2; exit 1; }
 grep -Eq '^Base OS: +[A-Za-z]' <<< "$logs" || { echo "no base OS" >&2; exit 1; }
-[[ $(grep -c '^Postfix M365 Relay$' <<< "$logs") -eq 1 ]] || { echo "banner printed more than once" >&2; exit 1; }
+[[ $(grep -c '^Starting Postfix M365 Relay$' <<< "$logs") -eq 1 ]] || { echo "banner printed more than once" >&2; exit 1; }
 
 release=$(docker run --rm --entrypoint cat "$image" /usr/share/postfix-m365-relay/release)
 if [[ -n $expected ]]; then
   grep -qx "version=$expected" <<< "$release" || { echo "release file: want version=$expected, have:" >&2; echo "$release" >&2; exit 1; }
   grep -Eqx 'released=[0-9]{4}-[0-9]{2}-[0-9]{2}' <<< "$release" || { echo "release file has no date" >&2; exit 1; }
-  grep -Eq "^Version: +$expected \(" <<< "$logs" || { echo "banner does not show $expected" >&2; exit 1; }
+  grep -Fqx "Version $expected" <<< "$logs" || { echo "banner does not show $expected" >&2; exit 1; }
   grep -Eq '^Released: +[0-9]{4}-' <<< "$logs" || { echo "banner does not show the date" >&2; exit 1; }
 else
-  grep -Eq '^Version: +development build' <<< "$logs" || { echo "dev build not labelled" >&2; exit 1; }
+  grep -qx 'Development build (not a published release)' <<< "$logs" || { echo "dev build not labelled" >&2; exit 1; }
 fi
 
 # A published release file, and a hostile one: values are shown, escapes are not.
 printf 'version=9.8.7\nvariant=alpine\nreleased=2026-10-21\nrevision=0123456789abcdef0123\n' > "$fixture/release"
-logs=$(banner_of -v "$fixture/release":/usr/share/postfix-m365-relay/release:ro)
-grep -Eq '^Version: +9\.8\.7 \(alpine\)$' <<< "$logs" || { echo "release values not shown" >&2; echo "$logs" >&2; exit 1; }
+logs=$(unboxed "$(banner_of -v "$fixture/release":/usr/share/postfix-m365-relay/release:ro)")
+grep -Fqx 'Version 9.8.7' <<< "$logs" || { echo "version not shown" >&2; echo "$logs" >&2; exit 1; }
+grep -Eq '^Variant: +alpine$' <<< "$logs" || { echo "release values not shown" >&2; echo "$logs" >&2; exit 1; }
 grep -Eq '^Released: +2026-10-21$' <<< "$logs"
 grep -Eq '^Commit: +0123456789ab$' <<< "$logs"
 printf 'version=1.0\033[2J\033]0;owned\007\nvariant=x\r\n' > "$fixture/release"
-logs=$(banner_of -v "$fixture/release":/usr/share/postfix-m365-relay/release:ro)
-if LC_ALL=C grep -q $'[\033\007\r]' <<< "$logs"; then
+raw=$(banner_of -v "$fixture/release":/usr/share/postfix-m365-relay/release:ro)
+logs=$(unboxed "$raw")
+if LC_ALL=C grep -q $'[\033\007\r]' <<< "$raw"; then
   echo "control characters from the release file reached the log" >&2; exit 1
 fi
-grep -Eq '^Version: +1\.0\[2J\]0;owned \(x\)$' <<< "$logs" || { echo "hostile values not neutralised as expected" >&2; echo "$logs" >&2; exit 1; }
+grep -Fqx 'Version 1.0[2J]0;owned' <<< "$logs" || { echo "hostile values not neutralised as expected" >&2; echo "$logs" >&2; exit 1; }
+grep -Eq '^Variant: +x$' <<< "$logs" || { echo "hostile values not neutralised as expected" >&2; echo "$logs" >&2; exit 1; }
 
 echo "ok startup banner shows relay ${expected:-development build}, Postfix $postfix, base OS and sasl-xoauth2, once"

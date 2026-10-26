@@ -107,9 +107,9 @@ print_banner() {
   version=${release[version]:-}; variant=${release[variant]:-}
   released=${release[released]:-}; revision=${release[revision]:-}
   if [[ -n $version ]]; then
-    version="$version${variant:+ ($variant)}"
+    version="Version $version"
   else
-    version='development build (not a published release)'
+    version='Development build (not a published release)'
   fi
   # shellcheck source=/dev/null
   os=$( { . /etc/os-release && printf '%s' "${PRETTY_NAME:-$NAME $VERSION_ID}"; } 2>/dev/null || true)
@@ -121,16 +121,31 @@ print_banner() {
   elif value=$(rpm -q --qf '%{VERSION}' sasl-xoauth2 2>/dev/null); then
     sxo="$value (EPEL)"
   fi
-  rule='────────────────────────────────────────────────────────────'
-  printf '%s\n' "$rule" 'Postfix M365 Relay' "$rule"
-  printf '%-15s %s\n' 'Version:' "$version"
-  [[ -z $released ]] || printf '%-15s %s\n' 'Released:' "$released"
-  [[ -z $revision ]] || printf '%-15s %s\n' 'Commit:' "${revision:0:12}"
-  printf '%-15s %s\n' 'Base OS:' "$(banner_value "${os:-unknown}")"
-  printf '%-15s %s\n' 'Postfix:' "$(banner_value "${postfix:-unknown}")"
-  printf '%-15s %s\n' 'sasl-xoauth2:' "$(banner_value "${sxo:-unknown}")"
-  printf '%-15s %s\n' 'Source:' 'https://github.com/sg1888/postfix-m365-relay'
-  printf '%s\n' "$rule"
+  # A plain-ASCII box, like Vaultwarden's: the name and version centred at the
+  # top, the details below. Anything too long for the box is cut, not wrapped.
+  rule=$(printf '%68s' ''); rule=${rule// /-}
+  printf '/%s\\\n' "$rule"
+  banner_centre 'Starting Postfix M365 Relay'
+  banner_centre "$version"
+  printf '|%s|\n' "$rule"
+  [[ -z $variant ]] || banner_row 'Variant:' "$variant"
+  [[ -z $released ]] || banner_row 'Released:' "$released"
+  [[ -z $revision ]] || banner_row 'Commit:' "${revision:0:12}"
+  banner_row 'Base OS:' "$(banner_value "${os:-unknown}")"
+  banner_row 'Postfix:' "$(banner_value "${postfix:-unknown}")"
+  banner_row 'sasl-xoauth2:' "$(banner_value "${sxo:-unknown}")"
+  banner_row 'Source:' 'https://github.com/sg1888/postfix-m365-relay'
+  printf '\\%s/\n' "$rule"
+}
+banner_centre() {
+  local text=${1:0:66} left
+  left=$(( (68 - ${#text}) / 2 ))
+  printf '|%*s%s%*s|\n' "$left" '' "$text" "$(( 68 - left - ${#text} ))" ''
+}
+banner_row() {
+  local text
+  text=$(printf '%-15s %s' "$1" "$2")
+  printf '| %-66s |\n' "${text:0:66}"
 }
 # Once per container start: setup mode re-executes this script.
 if [[ -z ${MAIL_RELAY_BANNER_SHOWN:-} ]]; then

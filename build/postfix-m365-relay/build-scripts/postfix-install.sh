@@ -20,6 +20,8 @@ set -eu
 
 # shellcheck source=build/postfix-m365-relay/build-scripts/version.sh
 . /build-scripts/version.sh
+# shellcheck source=build/postfix-m365-relay/build-scripts/retry.sh
+. /build-scripts/retry.sh
 
 # Oldest EPEL sasl-xoauth2 the AlmaLinux images accept. A FLOOR, not a pin:
 # EPEL updates the package in place, and a newer release must build (and is then
@@ -67,7 +69,8 @@ do_alma() {
     test "$(rpm -q --qf '%{ARCH}' almalinux-release)" = "$EXPECT_ALMALINUX_ARCH"
   fi
 
-  dnf -y upgrade
+  retry_refresh='dnf clean metadata'
+  with_retry dnf -y upgrade
 
   if rpm -q --qf '%{ARCH}' almalinux-release | grep -qx x86_64_v2; then
     altarch_epel=$(curl -fsS "$altarch_epel_base" 2>/dev/null |
@@ -75,13 +78,13 @@ do_alma() {
       sort -uV | tail -n1) || true
     altarch_epel=${altarch_epel:-$altarch_epel_fallback}
     echo "altarch EPEL release package: $altarch_epel"
-    dnf -y install --setopt=install_weak_deps=False "$altarch_epel_base$altarch_epel"
+    with_retry dnf -y install --setopt=install_weak_deps=False "$altarch_epel_base$altarch_epel"
   else
-    dnf -y install --setopt=install_weak_deps=False \
+    with_retry dnf -y install --setopt=install_weak_deps=False \
       https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
   fi
 
-  dnf -y install --setopt=install_weak_deps=False \
+  with_retry dnf -y install --setopt=install_weak_deps=False \
     postfix cyrus-sasl cyrus-sasl-plain sasl-xoauth2 ca-certificates \
     python3 python3-cryptography openssl curl nmap-ncat iproute tzdata
   dnf clean all
@@ -136,12 +139,13 @@ install_built_plugin() {
 # because their package names change between releases.
 do_apt() {
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update
+  retry_refresh='apt-get update'
+  with_retry apt-get update
   # The base image is a periodic snapshot; security fixes published since
   # (openssl, glibc, ca-certificates, ...) arrive only through this upgrade.
-  apt-get -y upgrade
+  with_retry apt-get -y upgrade
   # shellcheck disable=SC2046 -- one package name per line, deliberately split
-  apt-get install -y --no-install-recommends \
+  with_retry apt-get install -y --no-install-recommends \
     postfix libsasl2-2 libsasl2-modules sasl2-bin ca-certificates \
     python3 python3-cryptography openssl curl netcat-openbsd iproute2 procps tzdata \
     $(cat /sasl-xoauth2-out/usr/share/postfix-m365-relay/sasl-xoauth2.deps)
@@ -170,9 +174,9 @@ do_apt() {
 # grep: the supervisor's log pipeline needs --line-buffered, which busybox grep
 # lacks.
 do_apk() {
-  apk upgrade --no-cache
+  with_retry apk upgrade --no-cache
   # shellcheck disable=SC2046 -- one package name per line, deliberately split
-  apk add --no-cache \
+  with_retry apk add --no-cache \
     bash grep postfix cyrus-sasl cyrus-sasl-login ca-certificates \
     python3 py3-cryptography openssl curl netcat-openbsd iproute2-minimal tzdata \
     $(cat /sasl-xoauth2-out/usr/share/postfix-m365-relay/sasl-xoauth2.deps)

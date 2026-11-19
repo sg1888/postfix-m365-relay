@@ -19,6 +19,9 @@
 #   /sasl-xoauth2-vendor   vendor/sasl-xoauth2 (UPSTREAM, SHA256SUMS, src/)
 set -eu
 
+# shellcheck source=build/postfix-m365-relay/build-scripts/retry.sh
+. /build-scripts/retry.sh
+
 vendor=/sasl-xoauth2-vendor
 out=/out
 mkdir -p "$out"
@@ -61,11 +64,12 @@ src_version=$(head -n1 "$src/ChangeLog" | sed -e 's/.*(//' -e 's/).*//')
 
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y --no-install-recommends \
+  retry_refresh='apt-get update'
+  with_retry apt-get update
+  with_retry apt-get install -y --no-install-recommends \
     g++ make cmake pkg-config libsasl2-dev libcurl4-openssl-dev libjsoncpp-dev
 elif command -v apk >/dev/null 2>&1; then
-  apk add --no-cache build-base cmake pkgconf cyrus-sasl-dev curl-dev jsoncpp-dev
+  with_retry apk add --no-cache build-base cmake pkgconf cyrus-sasl-dev curl-dev jsoncpp-dev
 else
   echo "unsupported builder base: need apt-get or apk" >&2
   exit 1

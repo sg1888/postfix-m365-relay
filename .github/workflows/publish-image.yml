@@ -10,7 +10,9 @@ name: publish image
 #      so: for a CRITICAL or HIGH CVE that a rebuild fixes (which also ships
 #      every other pending update), or as a backstop once the newest release
 #      is 60 days old, before the relay's 90-day image-age alert. This keeps
-#      the number of versions small.
+#      the number of versions small. A release whose variants were not all
+#      published (one build failed after others were pushed) is completed
+#      first: the same version, rebuilt from its own commit.
 # Nothing is pushed before it passes: the full test suite (every distro, fresh
 # packages, Trivy), then per variant a from-scratch build whose exact layers are
 # scanned, container-tested and package-checked on every platform before the
@@ -116,6 +118,38 @@ jobs:
               variants+=("$v-$extra linux/amd64")
             fi
           done
+          # A release that is missing a variant is completed first. A build can
+          # fail after other variants were pushed: on 2026-10-26 a bad AlmaLinux
+          # mirror response failed v1.5.3's alma-v2 build, and with
+          # 1.5.3-alma-v2 absent every daily run failed below (unscannable)
+          # until it was re-run by hand. Republish the same version from its
+          # own commit instead: every variant, the release notes, no new tag.
+          # Only a registry answer of "not found" counts as missing; any other
+          # error falls through to the scan, which fails as before.
+          missing=()
+          for variant in "${variants[@]}"; do
+            read -r tag platform <<< "$variant"
+            for _attempt in 1 2 3; do
+              if out=$(docker buildx imagetools inspect "$IMAGE:$tag" 2>&1); then
+                out=; break
+              fi
+              grep -qiE 'not found|manifest unknown' <<< "$out" || { out=; break; }
+              sleep 10
+            done
+            [ -z "$out" ] || missing+=("$IMAGE:$tag")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            reason="completing $last: ${missing[*]##*:} never published"
+            {
+              echo "publish=true"; echo "version=$last"; echo "sha=$sha"
+              echo "stable=true"; echo "create_tag=false"; echo "base_version="
+              echo "reason=$reason"
+            } >> "$GITHUB_OUTPUT"
+            echo "::warning::$reason; republishing $last"
+            echo "Completing $last (commit ${sha:0:12}): ${missing[*]} missing from the registry." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           for variant in "${variants[@]}"; do
             read -r tag platform <<< "$variant"
             echo "## $tag" >> updates.txt
